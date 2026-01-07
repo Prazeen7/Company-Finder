@@ -239,39 +239,248 @@ def custom_print(*args, **kwargs):
     message = " ".join(str(arg) for arg in args)
     process_log.append({"timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"), "message": message})
     print(*args, **kwargs)
-
-# Find domain using Google Search API with fallback
-def find_domain_google(query):
-    # List of social media domains to exclude
+    
+def get_all_google_domains(query, company_name=None):
+    """Get all domains from Google search results and validate them"""
     social_media_domains = [
         'facebook.com', 'instagram.com', 'linkedin.com', 'youtube.com', 'pinterest.com',
         'twitter.com', 'tiktok.com', 'snapchat.com', 'reddit.com'
     ]
     
+    company_clean = ""
+    company_words = []
+    if company_name:
+        company_clean = re.sub(r'\s*(pvt|ltd|limited|private|inc|incorporated|co|company|corp|corporation|llc|gmbh|plc)\s*\.?$', 
+                              '', company_name, flags=re.IGNORECASE)
+        company_clean = company_clean.lower().strip()
+        company_words = re.findall(r'\b\w+\b', company_clean)
+    
+    custom_print(f"🔍 Searching Google for all domains matching: '{company_clean}' (words: {company_words})")
+    
+    all_domains = []
+    
     for api_key in GOOGLE_API_KEYS:
         try:
             service = build("customsearch", "v1", developerKey=api_key)
-            res = service.cse().list(q=query, cx=SEARCH_ENGINE_ID, num=5).execute()  # Increased to 5 results for better selection
-            for item in res.get("items", []):
+            res = service.cse().list(q=query, cx=SEARCH_ENGINE_ID, num=10).execute()
+            items = res.get("items", [])
+            
+            for item in items:
                 link = item.get("link", "")
+                title = item.get("title", "").lower()
+                snippet = item.get("snippet", "").lower()
                 parsed = urlparse(link)
+                domain_name = parsed.netloc.lower()
                 domain = f"{parsed.scheme}://{parsed.netloc}/"
-                # Check if the domain is not a social media domain
-                if not any(social_domain in parsed.netloc.lower() for social_domain in social_media_domains):
-                    custom_print(f"✅ Found non-social media domain via Google API: {domain}")
-                    return domain
-            custom_print(f"⚠️ No non-social media domains found in results for query: {query}")
+                
+                # Skip social media domains
+                if any(social_domain in domain_name for social_domain in social_media_domains):
+                    continue
+                
+                # Extract domain without TLD and www for matching
+                domain_base = re.sub(r'^www\.', '', domain_name)
+                domain_base = re.sub(r'\.(com|org|net|io|co|in|us|uk|au|ca|de|fr|jp|biz|info|mobi|name|tv|cc|ws)$', '', domain_base)
+                
+                # Check if this domain matches the company
+                matches_company = False
+                if company_words:
+                    matches = []
+                    for word in company_words:
+                        if word in domain_base:
+                            matches.append(word)
+                    
+                    # For multi-word companies, require ALL words to match
+                    if len(company_words) >= 2:
+                        matches_company = (len(matches) == len(company_words))
+                    else:
+                        matches_company = (len(matches) == 1)
+                
+                domain_info = {
+                    'domain': domain,
+                    'domain_name': domain_name,
+                    'domain_base': domain_base,
+                    'title': title[:100],
+                    'matches_company': matches_company,
+                    'full_match': False
+                }
+                
+                # Mark as full match if ALL company words are in domain
+                if company_words and matches_company:
+                    domain_info['full_match'] = True
+                    custom_print(f"  ✅ FULL MATCH: {domain_name}")
+                else:
+                    custom_print(f"  ⚠️ Partial/No match: {domain_name}")
+                
+                all_domains.append(domain_info)
+            
+            break  # Successfully got results, stop trying API keys
+            
         except HttpError as e:
             if e.resp.status == 429:
                 custom_print(f"❌ Google API error with key {api_key}: Quota exceeded. Trying next API key...")
                 continue
             else:
                 custom_print(f"❌ Google API error with key {api_key}: {e}")
-                return None
+                return []
         except Exception as e:
             custom_print(f"❌ Google API error with key {api_key}: {e}")
+            return []
+    
+    return all_domains
+
+def find_domain_google(query, company_name=None):
+    """Find domain using Google Search API with multiple search approaches"""
+    
+    # Clean company name for matching
+    company_clean = ""
+    company_words = []
+    if company_name:
+        company_clean = re.sub(r'\s*(pvt|ltd|limited|private|inc|incorporated|co|company|corp|corporation|llc|gmbh|plc)\s*\.?$', 
+                              '', company_name, flags=re.IGNORECASE)
+        company_clean = company_clean.lower().strip()
+        company_words = re.findall(r'\b\w+\b', company_clean)
+    
+    custom_print(f"🔍 Searching for domain matching: '{company_clean}' (words: {company_words})")
+    
+    # Try multiple search queries
+    search_queries = [
+        query,  # Original query
+        f"{company_name} website",  # Add "website" keyword
+        f"{company_name} official website",  # Add "official website"
+        f"{company_clean.replace(' ', '')}.com",  # Try domain pattern
+        f"{company_clean} com",  # Try with "com"
+    ]
+    
+    all_domains = []
+    
+    for search_query in search_queries:
+        custom_print(f"  Trying search query: '{search_query}'")
+        
+        for api_key in GOOGLE_API_KEYS:
+            try:
+                service = build("customsearch", "v1", developerKey=api_key)
+                res = service.cse().list(q=search_query, cx=SEARCH_ENGINE_ID, num=10).execute()
+                items = res.get("items", [])
+                
+                for item in items:
+                    link = item.get("link", "")
+                    title = item.get("title", "").lower()
+                    snippet = item.get("snippet", "").lower()
+                    parsed = urlparse(link)
+                    domain_name = parsed.netloc.lower()
+                    
+                    # Skip social media and common unrelated sites
+                    social_media = ['facebook', 'instagram', 'linkedin', 'youtube', 'pinterest', 
+                                   'twitter', 'tiktok', 'snapchat', 'reddit', 'wikipedia']
+                    if any(social in domain_name for social in social_media):
+                        continue
+                    
+                    domain = f"{parsed.scheme}://{parsed.netloc}/"
+                    
+                    # Extract domain without TLD and www for matching
+                    domain_base = re.sub(r'^www\.', '', domain_name)
+                    domain_base = re.sub(r'\.(com|org|net|io|co|in|us|uk|au|ca|de|fr|jp|biz|info|mobi|name|tv|cc|ws)$', '', domain_base)
+                    
+                    # Check if this domain matches the company
+                    matches_company = False
+                    match_score = 0
+                    
+                    if company_words:
+                        matches = []
+                        for word in company_words:
+                            if len(word) > 3 and word in domain_base:
+                                matches.append(word)
+                                match_score += 10
+                        
+                        # Also check for combined words
+                        company_combined = company_clean.replace(" ", "")
+                        if company_combined in domain_base:
+                            match_score += 50  # Big bonus for exact combined match
+                            matches_company = True
+                        elif len(matches) >= len(company_words):
+                            match_score += 30  # All words match
+                            matches_company = True
+                        elif len(matches) > 0:
+                            match_score += 15  # Some words match
+                    
+                    # Check title and snippet for company mention
+                    for word in company_words:
+                        if word in title:
+                            match_score += 5
+                        if word in snippet:
+                            match_score += 3
+                    
+                    # Skip low scoring domains
+                    if match_score < 10:
+                        continue
+                    
+                    domain_info = {
+                        'domain': domain,
+                        'domain_name': domain_name,
+                        'title': title[:100],
+                        'match_score': match_score,
+                        'matches_company': matches_company,
+                        'search_query': search_query
+                    }
+                    
+                    # Check if we already have this domain
+                    if not any(d['domain'] == domain for d in all_domains):
+                        all_domains.append(domain_info)
+                        custom_print(f"    Found: {domain_name} (score: {match_score})")
+                
+                break  # Successfully got results with this API key
+                
+            except HttpError as e:
+                if e.resp.status == 429:
+                    custom_print(f"❌ Google API error with key {api_key}: Quota exceeded. Trying next API key...")
+                    continue
+                else:
+                    custom_print(f"❌ Google API error with key {api_key}: {e}")
+                    continue
+            except Exception as e:
+                custom_print(f"❌ Google API error with key {api_key}: {e}")
+                continue
+    
+    # Sort domains by match score
+    all_domains.sort(key=lambda x: x['match_score'], reverse=True)
+    
+    custom_print(f"\n📊 Search Results Analysis:")
+    custom_print(f"  Total domains found: {len(all_domains)}")
+    
+    if all_domains:
+        custom_print(f"\n✅ Top matching domains:")
+        for i, domain_info in enumerate(all_domains[:5], 1):
+            custom_print(f"  {i}. {domain_info['domain']} (score: {domain_info['match_score']})")
+            custom_print(f"     Title: {domain_info['title']}")
+        
+        # Return the best matching domain
+        best = all_domains[0]
+        if best['match_score'] >= 20:  # Reasonable threshold
+            custom_print(f"\n✅ Using best matching domain: {best['domain']} (score: {best['match_score']})")
+            return best['domain']
+        else:
+            custom_print(f"\n⚠️ Best domain score too low: {best['match_score']} (threshold: 20)")
+            custom_print(f"   Best available: {best['domain']}")
             return None
-    custom_print("❌ All API keys failed or quota exceeded.")
+    
+    custom_print("❌ No suitable domains found in any search")
+    
+    # Fallback: Try direct domain construction
+    if company_words and len(company_words) >= 2:
+        possible_domains = [
+            f"https://{company_clean.replace(' ', '').lower()}.com",
+            f"https://{company_clean.replace(' ', '-').lower()}.com",
+            f"https://www.{company_clean.replace(' ', '').lower()}.com",
+            f"https://www.{company_clean.replace(' ', '-').lower()}.com",
+        ]
+        
+        custom_print(f"\n🔄 Trying direct domain construction...")
+        for test_domain in possible_domains:
+            custom_print(f"  Testing: {test_domain}")
+            if is_link_accessible(test_domain, max_retries=1):
+                custom_print(f"✅ Direct domain accessible: {test_domain}")
+                return test_domain
+    
     return None
 
 # Initialize Selenium driver with optimized configuration
@@ -1697,15 +1906,61 @@ def fallback_google_search(query, company, location, social_platforms=None):
         f.write(debug_log + "\n")
     return ({} if social_platforms else set()), [], debug_log
 
+def validate_company_match(domain, company_name):
+    """Validate if a domain belongs to the given company with strict matching"""
+    if not domain or not company_name:
+        return False
+    
+    parsed = urlparse(domain)
+    domain_name = parsed.netloc.lower()
+    
+    # Clean company name
+    company_clean = re.sub(r'\s*(pvt|ltd|limited|private|inc|incorporated|co|company|corp|corporation|llc|gmbh|plc)\s*\.?$', 
+                          '', company_name, flags=re.IGNORECASE)
+    company_clean = company_clean.lower().strip()
+    
+    # Get company words (ignore common short words)
+    company_words = [word for word in re.findall(r'\b\w+\b', company_clean) if len(word) > 3]
+    
+    if not company_words:
+        company_words = re.findall(r'\b\w+\b', company_clean)
+    
+    # Extract domain without TLD and www
+    domain_base = re.sub(r'^www\.', '', domain_name)
+    domain_base = re.sub(r'\.(com|org|net|io|co|in|us|uk|au|ca|de|fr|jp|biz|info|mobi|name|tv|cc|ws)$', '', domain_base)
+    
+    # Check if domain contains company words
+    matches = []
+    for word in company_words:
+        if word in domain_base:
+            matches.append(word)
+    
+    # Calculate match percentage
+    if company_words:
+        match_percentage = (len(matches) / len(company_words)) * 100
+        
+        # Strict criteria: At least 50% match OR first word must match
+        if match_percentage >= 50 or (company_words and company_words[0] in domain_base):
+            custom_print(f"✅ Company match: {match_percentage:.0f}% - Words matched: {matches}")
+            return True
+        else:
+            custom_print(f"❌ Weak company match: {match_percentage:.0f}% - Only matched: {matches}")
+            return False
+    
+    return False
+
 # Modified main function
 def scrape_company(company, location=None, manual_domain=None):
     global process_log
     process_log = []
     query = f"{company} {location}" if location else company
     custom_print(f"\n🔍 Searching Google for '{query}'...")
-    domain = manual_domain or find_domain_google(query)
+    
+    # Pass company name to find_domain_google for validation
+    domain = manual_domain or find_domain_google(query, company)
+    
     if not domain:
-        custom_print("❌ Domain not found.")
+        custom_print("❌ No valid domain found matching the company name.")
         return {
             "company_name": company,
             "domain": "N/A",
@@ -1716,19 +1971,40 @@ def scrape_company(company, location=None, manual_domain=None):
             "phone_numbers": [],
             "addresses": [],
             "links": [],
-            "country": "N/A",  # Only country now
+            "country": "N/A",
             "business_nature": "N/A",
             "company_links": [],
             "process_log": process_log
         }
-
+    
     if not domain.startswith(("http://", "https://")):
         domain = f"https://{domain}"
     if not domain.endswith("/"):
         domain += "/"
-
-    custom_print(f"✅ Using domain: {domain}")
+    
+    # # Strict validation
+    # if not validate_company_match(domain, company):
+    #     custom_print(f"❌ REJECTED: Domain '{domain}' doesn't sufficiently match company '{company}'")
+    #     custom_print("   Please provide a manual domain or check the company name spelling.")
+    #     return {
+    #         "company_name": company,
+    #         "domain": "N/A (no matching domain found)",
+    #         "emails": [],
+    #         "social_media": {platform: [] for platform in SOCIAL_REGEXES.keys()},
+    #         "meta_description": "N/A",
+    #         "about_content": "N/A",
+    #         "phone_numbers": [],
+    #         "addresses": [],
+    #         "links": [],
+    #         "country": "N/A",
+    #         "business_nature": "N/A",
+    #         "company_links": [],
+    #         "process_log": process_log
+    #     }
+    
+    custom_print(f"✅ Using verified domain: {domain}")
     custom_print(f"📡 Starting full-site scraping from: {domain}\n")
+
     emails, socials, meta_desc, about_content, phones, addresses, links, location_info, business_nature, footer_contents, debug_info = crawl_website(domain)
 
     fallback_debug_logs = []
