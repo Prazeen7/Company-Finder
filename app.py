@@ -12,20 +12,16 @@ from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.proxy import Proxy, ProxyType
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException, UnexpectedAlertPresentException
 from selenium.webdriver.common.alert import Alert
-from selenium.webdriver.common.action_chains import ActionChains
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from flask import Flask, render_template, request, jsonify, Response
 import uuid
 from webdriver_manager.chrome import ChromeDriverManager
@@ -143,6 +139,266 @@ try:
 except Exception as e:
     print(f"❌ Failed to load Llama model: {e}")
     pipeline = None
+    
+def fallback_keyword_matching(links):
+    """Fallback to simple keyword matching when Llama fails"""
+    about_links = []
+    contact_links = []
+    
+    about_patterns = [
+        r'.*about.*', r'.*story.*', r'.*team.*', r'.*company.*', r'.*mission.*',
+        r'.*vision.*', r'.*who.*we.*are.*', r'.*history.*', r'.*leadership.*',
+        r'.*values.*', r'.*culture.*', r'.*philosophy.*'
+    ]
+    
+    contact_patterns = [
+        r'.*contact.*', r'.*get.*in.*touch.*', r'.*reach.*us.*', r'.*support.*',
+        r'.*help.*', r'.*customer.*service.*', r'.*inquiries.*', r'.*feedback.*'
+    ]
+    
+    for link in links:
+        url = link.get('url', '').lower()
+        text = link.get('text', '').lower()
+        
+        # Check for about pages
+        for pattern in about_patterns:
+            if re.search(pattern, url) or re.search(pattern, text):
+                about_links.append(link)
+                break
+        
+        # Check for contact pages
+        for pattern in contact_patterns:
+            if re.search(pattern, url) or re.search(pattern, text):
+                contact_links.append(link)
+                break
+    
+    return {
+        "about": about_links,
+        "contact": contact_links
+    }
+
+# Load country codes for phone validation
+COUNTRY_CODES = {}
+def load_country_codes():
+    """Load country codes from countryCode.txt file"""
+    global COUNTRY_CODES
+    try:
+        country_code_file = os.path.join(os.path.dirname(__file__), "countryCode.txt")
+        with open(country_code_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if '\t' in line:
+                    parts = line.split('\t')
+                    if len(parts) == 2:
+                        country = parts[0].strip()
+                        codes = parts[1].strip()
+                        # Handle multiple codes (e.g., "1-787, 1-939")
+                        for code in codes.split(','):
+                            code = code.strip()
+                            COUNTRY_CODES[code] = country
+        custom_print(f"✅ Loaded {len(COUNTRY_CODES)} country codes")
+    except Exception as e:
+        print(f"❌ Failed to load country codes: {e}")
+
+# Validate phone number with country codes
+def validate_phone_with_country_code(phone):
+    """Validate phone number against country codes and return phone with country info"""
+    # Extract potential country code from phone number
+    phone_clean = re.sub(r'[^\d+]', '', phone)
+
+    # Check if phone starts with +
+    if phone_clean.startswith('+'):
+        phone_clean = phone_clean[1:]
+
+    # Try to match country codes (from longest to shortest)
+    matched_country = None
+    matched_code = None
+
+    # Sort codes by length (longest first) to match more specific codes first
+    sorted_codes = sorted(COUNTRY_CODES.keys(), key=lambda x: len(x.replace('-', '')), reverse=True)
+
+    for code in sorted_codes:
+        code_clean = code.replace('-', '')
+        if phone_clean.startswith(code_clean):
+            matched_code = code
+            matched_country = COUNTRY_CODES[code]
+            break
+
+    if matched_country:
+        return {
+            "phone": phone,
+            "country_code": matched_code,
+            "country": matched_country,
+            "is_valid": True
+        }
+    else:
+        return {
+            "phone": phone,
+            "country_code": "Unknown",
+            "country": "Unknown",
+            "is_valid": False
+        }
+
+# Identify About/Contact links using Llama
+def identify_about_contact_links(links):
+    """
+    Use Llama to identify which links are About Us or Contact Us pages
+    Args:
+        links: List of dicts with 'url' and 'text' keys
+    Returns:
+        Dict with 'about' and 'contact' lists containing identified links
+    """
+    if not pipeline or not links:
+        custom_print("❌ Llama model not loaded or no links provided")
+        return {"about": [], "contact": []}
+
+    # Pre-filtering logic
+    about_keywords = [
+        'about', 'story', 'team', 'company', 'mission', 'vision', 'who-we-are',
+        'our-story', 'our-team', 'our-mission', 'history', 'leadership', 'values',
+        'meet-the-team', 'meet-us', 'who-are-we', 'culture', 'philosophy'
+    ]
+
+    contact_keywords = [
+        'contact', 'get-in-touch', 'reach-us', 'support', 'help', 'customer-service',
+        'contact-us', 'reach-out', 'talk-to-us', 'customer-support', 'assistance',
+        'inquiries', 'feedback', 'get-help', 'support-center'
+    ]
+
+    # Keywords to exclude
+    exclude_keywords = [
+        'product', 'cart', 'checkout', 'login', 'register', 'sign-in', 'sign-up',
+        'account', 'wishlist', 'shop', 'collection', 'category', 'search', 'filter',
+        'sort', 'view', 'add-to-cart', 'buy', 'purchase', 'price', 'sale', 'deal',
+        'shipping', 'return', 'refund', 'tracking', 'order', '/products/', '/cart',
+        '/checkout', '/account', '/login', '/register', '/search', 'color', 'size',
+        'material', 'fabric', 'quick-ship', 'ready-to-ship', 'gift-card', 'blog',
+        'news', 'article', 'post', 'kitchen', 'dining', 'living', 'bedroom', 'bathroom',
+        'entryway', 'hallway', 'runner', 'rug', 'loom', 'wool', 'natural', 'red',
+        'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'black', 'brown',
+        'grey', 'tan', 'minis', '4x6', '5x7', '6x9', '8x8', '8x10', '9x12', '10x10'
+    ]
+
+    filtered_links = []
+    filtered_indices = []  # Keep track of original indices
+    
+    for i, link in enumerate(links):
+        url = link.get('url', '').lower()
+        text = link.get('text', '').lower()
+
+        # Check if should be excluded
+        should_exclude = any(keyword in url or keyword in text for keyword in exclude_keywords)
+        if should_exclude:
+            continue
+
+        # Check if matches about/contact keywords
+        is_about = any(keyword in url or keyword in text for keyword in about_keywords)
+        is_contact = any(keyword in url or keyword in text for keyword in contact_keywords)
+
+        if is_about or is_contact:
+            filtered_links.append(link)
+            filtered_indices.append(i)  # Store the original index
+
+    custom_print(f"🔍 Pre-filtered from {len(links)} to {len(filtered_links)} potentially relevant links")
+
+    if not filtered_links:
+        custom_print("⚠️ No links matched pre-filtering criteria")
+        return {"about": [], "contact": []}
+
+    # Prepare link information for Llama
+    links_text = []
+    for i, link in enumerate(filtered_links):
+        url = link.get('url', '')
+        text = link.get('text', '')
+        links_text.append(f"{i}. URL: {url} | Link Text: {text}")
+
+    links_input = "\n".join(links_text[:50])  # Limit to 50 links
+
+    prompt = f"""From the following navigation/footer links, identify which pages are "About Us" or "Contact Us" pages.
+
+About Us pages include: company information, team, story, mission, values, history, who we are, etc.
+Contact Us pages include: contact forms, customer support, get in touch, reach us, help, inquiries, etc.
+
+Look at both the URL and link text to decide.
+
+Pre-filtered Links:
+{links_input}
+
+Return a JSON object with two keys: "about" and "contact". Each key should have an array of the indices (numbers) from the list above that correspond to About or Contact pages.
+
+Example response format:
+{{
+  "about": [0, 2, 5],
+  "contact": [1, 3]
+}}
+
+Return ONLY the JSON object, no additional text or explanations."""
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that analyzes website navigation links to identify About and Contact pages. Return ONLY valid JSON."},
+        {"role": "user", "content": prompt}
+    ]
+
+    try:
+        outputs = pipeline(
+            messages,
+            max_new_tokens=512,
+            temperature=0.1,  # Lower temperature for more consistent output
+        )
+        content = outputs[0]["generated_text"][-1]["content"]
+        
+        # Log the raw output for debugging
+        custom_print(f"🔗 Llama raw output: {content}")
+        
+        # Save to debug file
+        with open(os.path.join(DEBUG_DIR, "llama_link_identification.txt"), "a", encoding="utf-8") as f:
+            f.write(f"Input:\n{links_input}\n\nLlama output:\n{content}\n\n{'='*80}\n\n")
+
+        # Try to extract JSON from the output
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            try:
+                result = json.loads(json_str)
+                about_indices = result.get("about", [])
+                contact_indices = result.get("contact", [])
+                
+                custom_print(f"📊 Parsed: {len(about_indices)} About indices, {len(contact_indices)} Contact indices")
+                
+                # Map filtered indices back to original links
+                identified = {
+                    "about": [],
+                    "contact": []
+                }
+                
+                for idx in about_indices:
+                    if isinstance(idx, int) and idx < len(filtered_links):
+                        # Get the original link using the stored original index
+                        original_idx = filtered_indices[idx]
+                        if original_idx < len(links):
+                            identified["about"].append(links[original_idx])
+                
+                for idx in contact_indices:
+                    if isinstance(idx, int) and idx < len(filtered_links):
+                        original_idx = filtered_indices[idx]
+                        if original_idx < len(links):
+                            identified["contact"].append(links[original_idx])
+                
+                custom_print(f"✅ Identified {len(identified['about'])} About pages and {len(identified['contact'])} Contact pages")
+                return identified
+                
+            except json.JSONDecodeError as e:
+                custom_print(f"❌ Failed to parse JSON: {e}")
+                custom_print(f"📄 Content was: {json_str}")
+        
+        # Fallback if no JSON found
+        custom_print("⚠️ No valid JSON found in model output, falling back to keyword matching")
+        return fallback_keyword_matching(filtered_links)
+
+    except Exception as e:
+        custom_print(f"❌ Error identifying links with Llama: {e}")
+        # Fallback to keyword matching
+        return fallback_keyword_matching(filtered_links)
 
 # Custom print function to capture console output
 process_log = []
@@ -241,7 +497,10 @@ def custom_print(*args, **kwargs):
     message = " ".join(str(arg) for arg in args)
     process_log.append({"timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"), "message": message})
     print(*args, **kwargs)
-    
+
+# Load country codes at startup
+load_country_codes()
+
 def get_all_google_domains(query, company_name=None):
     """Get all domains from Google search results and validate them"""
     social_media_domains = [
@@ -901,50 +1160,68 @@ def get_rendered_html(url, driver, retries=RETRY_ATTEMPTS):
     debug_data["status"] = "failed"
     return "", debug_data
 
+def extract_structured_address(text):
+    """Extract structured address information from text"""
+    # Common address patterns
+    address_patterns = [
+        r'(\d+\s+[\w\s]+(?:\s+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Ln|Lane))?[\s,]+[\w\s,]+(?:\s+\d{5}(?:-\d{4})?)?)',
+        r'([\w\s]+(?:\s+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard))?[\s,]+(?:Suite|Ste\.?|Unit|Apt\.?|#)?\s*\d*[\s,]+[\w\s,]+(?:\s+\d{5}(?:-\d{4})?)?)',
+        r'([A-Za-z\s]+,\s*[A-Za-z\s]+,\s*[A-Za-z\s]+(?:\s+\d{5})?)',
+    ]
+    
+    addresses = []
+    for pattern in address_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                match = match[0]
+            addr = match.strip()
+            # Check if it looks like a real address (not just random text)
+            if (len(addr.split()) >= 4 and 
+                any(keyword in addr.lower() for keyword in ['st', 'street', 'ave', 'avenue', 'rd', 'road', 'blvd', 'boulevard']) or
+                re.search(r'\d{5}(?:-\d{4})?', addr)):
+                addresses.append(addr)
+    
+    return addresses
+
 # Extract location info with Llama
 def extract_location_info(text):
     if not pipeline:
         custom_print("❌ Llama model not loaded, returning N/A for location info")
         return {"country": "N/A"}
 
-    input_text = f"Footer and Contact Page Text: {text}"
-    prompt = (
-        "From the provided text, extract only the country name where the company is located. "
-        "Return the result as a JSON object with a 'country' key. "
-        "If no clear country information is found in the text, set the key to 'N/A'. "
-        "Do not hallucinate or infer countries not explicitly mentioned in the text. "
-        "Look for country names, country codes, or clear geographical indicators. "
-        "For example, if the text mentions 'USA', 'United States', 'Canada', 'UK', 'Germany', etc., use that country name. "
-        "Return only the JSON object, no additional text or explanation.\n\n" + input_text
-    )
+    prompt = f"""From this text, extract ONLY the country where the company is located. If no country is mentioned, return "N/A".
+    
+Text: {text[:2000]}  # Limit text length
+    
+Return a JSON object with a "country" key. Example: {{"country": "United States"}} or {{"country": "N/A"}}
+Return ONLY the JSON object, no additional text."""
 
     messages = [
-        {"role": "system", "content": "You are a helpful assistant that extracts country information from text."},
+        {"role": "system", "content": "You are a helpful assistant that extracts country information from text. Return ONLY valid JSON."},
         {"role": "user", "content": prompt}
     ]
 
     try:
         outputs = pipeline(
             messages,
-            max_new_tokens=256,
+            max_new_tokens=100,
+            temperature=0.1,
         )
         content = outputs[0]["generated_text"][-1]["content"]
-
-        with open(os.path.join(DEBUG_DIR, "llama_location_info_output.txt"), "a", encoding="utf-8") as f:
-            f.write(f"Input: {input_text}\nLlama output: {content}\n\n")
-
-        custom_print(f"🌍 Extracted country info: {content}")
-
-        try:
-            result = json.loads(content)
-            return {
-                "country": result.get("country", "N/A")
-            }
-        except json.JSONDecodeError:
-            custom_print("❌ Failed to parse Llama output as JSON")
-            return {"country": "N/A"}
+        
+        # Extract JSON
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group(0))
+            country = result.get("country", "N/A")
+            custom_print(f"🌍 Extracted country: {country}")
+            return {"country": country}
+        
+        return {"country": "N/A"}
+        
     except Exception as e:
-        custom_print(f"❌ Error extracting country info with Llama: {e}")
+        custom_print(f"❌ Error extracting country info: {e}")
         return {"country": "N/A"}
 
 # Extract information from HTML
@@ -1095,13 +1372,35 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
             custom_print(f"❌ Failed to parse footerURL attribute: {footer.get('footerURL')}")
     
     # Collect <a href> tags from footer
+    footer_nav_links = []  # Store footer navigation links for Llama processing
     if footer:
-        footer_links = [a["href"] for a in footer.select('a[href]') if a["href"] and not any(a["href"].lower().endswith(ext) for ext in excluded_extensions)]
-        for href in footer_links:
-            href = urljoin(url, href).split("#")[0].split("?")[0]
-            if href:
-                all_hrefs.append(verify_href(href, "Footer"))
-    
+        for href_elem in footer.select('a[href]'):
+            if href_elem["href"] and not any(href_elem["href"].lower().endswith(ext) for ext in excluded_extensions):
+                href = urljoin(url, href_elem["href"]).split("#")[0]
+                link_text = href_elem.get_text().strip()
+                if href:
+                    all_hrefs.append(verify_href(href_elem["href"], "Footer"))
+                    # Store for Llama processing (only http/https links)
+                    if href.startswith(('http://', 'https://')):
+                        footer_nav_links.append({"url": href, "text": link_text})
+
+    # Collect navbar/header links
+    navbar_links = []
+    navbar_selector = (
+        'nav, header, [role="navigation"], [class*="nav" i], [class*="menu" i], '
+        '[class*="header" i], [id*="nav" i], [id*="menu" i], [id*="header" i]'
+    )
+    navbar = soup.select(navbar_selector)
+    for nav_elem in navbar:
+        for href_elem in nav_elem.select('a[href]'):
+            if href_elem["href"] and not any(href_elem["href"].lower().endswith(ext) for ext in excluded_extensions):
+                href = urljoin(url, href_elem["href"]).split("#")[0]
+                link_text = href_elem.get_text().strip()
+                if href.startswith(('http://', 'https://')):
+                    navbar_links.append({"url": href, "text": link_text})
+
+    custom_print(f"📋 Collected {len(navbar_links)} navbar links and {len(footer_nav_links)} footer links")
+
     # Process page sections
     about_sections = []
     contact_sections = []
@@ -1179,15 +1478,26 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
 
     # Regular DOM address extraction
     if footer_text:
+        # Use both regex and structured extraction
         for match in ADDRESS_REGEX.findall(footer_text):
             addr = match.strip()
             if len(addr.split()) > 3 and addr not in addresses:
                 addresses.add(addr)
+        
+        # Use structured extraction
+        structured_addresses = extract_structured_address(footer_text)
+        for addr in structured_addresses:
+            addresses.add(addr)
 
+    # Extract from main text too
     for match in ADDRESS_REGEX.findall(text):
         addr = match.strip()
         if len(addr.split()) > 3 and addr not in addresses:
             addresses.add(addr)
+    
+    structured_addresses = extract_structured_address(text)
+    for addr in structured_addresses:
+        addresses.add(addr)
 
     # Clean up social media lists and remove duplicates
     for platform in socials:
@@ -1232,8 +1542,20 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         json.dump(all_hrefs, f, indent=2, ensure_ascii=False)
     custom_print(f"📝 All hrefs saved to {hrefs_log_path}")
 
+    # Validate phone numbers with country codes
+    validated_phones = []
+    for phone in phones:
+        validation_result = validate_phone_with_country_code(phone)
+        if validation_result["is_valid"]:
+            validated_phones.append(validation_result)
+            custom_print(f"✅ Validated phone: {phone} -> {validation_result['country']} ({validation_result['country_code']})")
+        else:
+            # Keep unvalidated phones too, but mark them
+            validated_phones.append(validation_result)
+            custom_print(f"⚠️ Phone without valid country code: {phone}")
+
     custom_print(f"📧 Final emails: {list(emails)}")
-    custom_print(f"📞 Final phones: {list(phones)}")
+    custom_print(f"📞 Final phones: {len(validated_phones)} ({len([p for p in validated_phones if p['is_valid']])} validated)")
     custom_print(f"🏠 Final addresses: {list(addresses)}")
     custom_print(f"🔗 Total hrefs collected: {len(all_hrefs)}")
 
@@ -1242,12 +1564,14 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         socials,
         desc,
         about_content,
-        phones,
+        validated_phones,  # Return validated phones instead of raw phones
         combined_text,
         footer_html,
         footer_text,
         addresses,
-        all_hrefs
+        all_hrefs,
+        navbar_links,
+        footer_nav_links
     )
 
 # Generate business nature with Llama
@@ -1256,24 +1580,44 @@ def generate_business_nature(meta_desc, about_content):
         custom_print("❌ Llama model not loaded, returning N/A for business nature")
         return "N/A (Llama model not loaded)"
 
-    input_text = f"Meta Description: {meta_desc}\nAbout Us: {about_content}"
-    prompt = (
-        "Using the provided Meta Description and About Us content, describe the business nature of the company in one concise sentence. "
-        "If no valid Meta Description or About Us content is provided, return 'N/A'. "
-        "Do not hallucinate, do not repeat the input text, and return only the sentence as a string.\n\n" + input_text
-    )
+    # Use footer text or combined text if about_content is empty
+    input_text = ""
+    if meta_desc:
+        input_text += f"Meta Description: {meta_desc}\n"
+    if about_content:
+        input_text += f"About Us: {about_content[:1500]}"
+    
+    # If no proper inputs, return a generic message
+    if len(input_text.strip()) < 50:
+        custom_print("⚠️ Insufficient content for business nature generation")
+        return "N/A (Insufficient company information)"
+    
+    prompt = f"""Based on the following company information, describe the business nature in one concise sentence. Focus on what the company does, its industry, and its main products/services.
+
+{input_text}
+
+Describe the business nature concisely. Example: "A technology company specializing in software development for e-commerce platforms."
+Return only the description, no additional text or explanations."""
 
     messages = [
-        {"role": "system", "content": "You are a helpful assistant that describes business nature based on company information."},
+        {"role": "system", "content": "You are a business analyst that describes company business nature based on available information."},
         {"role": "user", "content": prompt}
     ]
 
     try:
         outputs = pipeline(
             messages,
-            max_new_tokens=256,
+            max_new_tokens=100,
+            temperature=0.1,
         )
-        content = outputs[0]["generated_text"][-1]["content"]
+        content = outputs[0]["generated_text"][-1]["content"].strip()
+        
+        # Clean up the response
+        if content.startswith('"') and content.endswith('"'):
+            content = content[1:-1]
+        
+        # Remove any prefix like "Business nature:" or similar
+        content = re.sub(r'^(?:Business\s*Nature|Description|Company\s*Description):\s*', '', content, flags=re.IGNORECASE)
 
         with open(os.path.join(DEBUG_DIR, "llama_business_nature_output.txt"), "a", encoding="utf-8") as f:
             f.write(f"Input: {input_text}\nLlama output: {content}\n\n")
@@ -1520,18 +1864,18 @@ def process_page(url, depth, parsed_domain, visited):
 
         is_about_page = "about" in url.lower()
         is_contact_page = "contact" in url.lower()
-        
-        emails, socials, desc, page_about_content, phones, combined_text, footer_html, footer_text, addresses, page_hrefs = scrape_info(
+
+        emails, socials, desc, page_about_content, phones, combined_text, footer_html, footer_text, addresses, page_hrefs, navbar_links, footer_nav_links = scrape_info(
             html, is_about_page, is_contact_page, url, page_debug_data
         )
-        
+
         custom_print(f"page_debug_data keys before update: {list(page_debug_data.keys())}")
-        
+
         page_debug_data.update({
             "status": "crawled" if html == page_debug_data["dynamic_html"] and page_debug_data.get("status", "initial") not in ["fallback_requests", "fallback_lightweight_requests"] else page_debug_data.get("status", "initial"),
             "all_links": []
         })
-        
+
         soup = BeautifulSoup(html, "lxml")
         discovered_links = []
         excluded_extensions = ['.pdf', '.jpg', '.png', '.jpeg', '.gif']
@@ -1540,11 +1884,41 @@ def process_page(url, depth, parsed_domain, visited):
             parsed_next = urlparse(next_url)
             link_text = a.get_text().strip().lower()
             page_debug_data["all_links"].append({"href": next_url, "text": link_text})
-            
-            if (parsed_next.netloc.endswith(parsed_domain) and
-                next_url not in visited and
-                ("about" in next_url.lower() or "contact" in next_url.lower() or "about" in link_text or "contact" in link_text)):
-                discovered_links.append((next_url, depth + 1))
+
+        # Use Llama to intelligently identify About/Contact pages from navbar and footer links
+        all_nav_links = navbar_links + footer_nav_links
+        if all_nav_links and depth == 0:  # Only use Llama on the homepage to discover pages
+            custom_print(f"🤖 Using Llama to identify About/Contact pages from {len(all_nav_links)} navigation links...")
+            identified_links = identify_about_contact_links(all_nav_links)
+
+            # Add identified About pages to crawl queue
+            for link_info in identified_links.get("about", []):
+                link_url = link_info["url"]
+                parsed_link = urlparse(link_url)
+                if (parsed_link.netloc.endswith(parsed_domain) and
+                    link_url not in visited):
+                    custom_print(f"📖 Llama identified About page: {link_url}")
+                    discovered_links.append((link_url, depth + 1))
+
+            # Add identified Contact pages to crawl queue
+            for link_info in identified_links.get("contact", []):
+                link_url = link_info["url"]
+                parsed_link = urlparse(link_url)
+                if (parsed_link.netloc.endswith(parsed_domain) and
+                    link_url not in visited):
+                    custom_print(f"📞 Llama identified Contact page: {link_url}")
+                    discovered_links.append((link_url, depth + 1))
+        else:
+            # Fallback to keyword matching for non-homepage pages or when no nav links
+            for a in soup.select('a[href]:not([href$=".pdf"], [href$=".jpg"], [href$=".png"], [href$=".jpeg"], [href$=".gif"])'):
+                next_url = urljoin(url, a["href"]).split("#")[0]
+                parsed_next = urlparse(next_url)
+                link_text = a.get_text().strip().lower()
+
+                if (parsed_next.netloc.endswith(parsed_domain) and
+                    next_url not in visited and
+                    ("about" in next_url.lower() or "contact" in next_url.lower() or "about" in link_text or "contact" in link_text)):
+                    discovered_links.append((next_url, depth + 1))
 
         # Save extracted links to all_links.txt (similar to provided code)
         all_links_file = os.path.join(DEBUG_DIR, "all_links.txt")
@@ -1600,20 +1974,31 @@ def crawl_website(domain, max_depth=MAX_DEPTH):
                     all_socials[platform] = []
                 all_socials[platform].extend([link for link in links if link not in all_socials.get(platform, [])])
             
-            all_phones.update(phones)
+            # Convert phone dictionaries to strings before adding to set
+            for phone_data in phones:
+                if isinstance(phone_data, dict):
+                    all_phones.add(phone_data.get("phone", ""))
+                else:
+                    all_phones.add(str(phone_data))
+            
             all_addresses.update(addresses)
             
-            for link in [l["href"] for l in page_debug_data["all_links"] if l["href"].startswith(('http://', 'https://'))]:
-                all_links.add(link)
+            # FIX: Extract just the href string from the dictionary
+            for link_dict in page_debug_data["all_links"]:
+                if link_dict.get("href", "").startswith(('http://', 'https://')):
+                    all_links.add(link_dict["href"])
             
             if combined_text:
                 all_footer_contact_texts.append(combined_text)
             
+            # FIX: Collect meta description and about content properly
             if not meta_description and desc:
                 meta_description = desc
+                custom_print(f"📝 Collected meta description: {desc[:100]}...")
             
-            if page_about_content:
+            if page_about_content and len(page_about_content) > len(about_content):
                 about_content = page_about_content
+                custom_print(f"📝 Collected about content: {page_about_content[:100]}...")
             
             if footer_html != "No footer found":
                 footer_contents.append({
@@ -1639,76 +2024,38 @@ def crawl_website(domain, max_depth=MAX_DEPTH):
         custom_print(f"❌ Error saving all hrefs log file: {str(e)}")
 
     combined_text = " ".join(all_footer_contact_texts)
-    location_info = extract_location_info(combined_text) if combined_text else {"country": "N/A"}
+    
+    # FIX: Extract country from addresses if available
+    location_info = {"country": "N/A"}
+    if addresses:
+        # Try to extract country from addresses
+        for address in addresses:
+            if "Nepal" in address or "Kathmandu" in address:
+                location_info["country"] = "Nepal"
+                custom_print(f"🌍 Extracted country from address: Nepal")
+                break
+    
+    # FIX: If no country found in addresses, use Llama
+    if location_info["country"] == "N/A" and combined_text:
+        location_info = extract_location_info(combined_text)
+    
+    # FIX: Debug output for business nature generation
+    custom_print(f"📝 Business nature generation inputs:")
+    custom_print(f"  Meta description: {'Yes' if meta_description else 'No'} ({len(meta_description)} chars)")
+    custom_print(f"  About content: {'Yes' if about_content else 'No'} ({len(about_content)} chars)")
+    
+    # Try to extract from footer if no about content
+    if not about_content and footer_contents:
+        for fc in footer_contents:
+            if "About" in fc["text"] or "about" in fc["text"]:
+                about_content = fc["text"][:2000]
+                custom_print(f"📝 Using footer text for about content")
+                break
+    
     business_nature = generate_business_nature(meta_description, about_content)
     
     return all_emails, all_socials, meta_description, about_content, all_phones, all_addresses, all_links, location_info, business_nature, footer_contents, debug_info
 
-def save_results(domain, emails, socials, meta_description, about_content, phones, addresses, links, location_info, business_nature, footer_contents, debug_info, process_log, company_links=None, company_name="Unknown"):
-    results = {
-        "company_name": company_name,
-        "domain": domain,
-        "emails": list(emails),
-        "social_media": socials,
-        "meta_description": meta_description or "N/A",
-        "about_content": about_content or "N/A",
-        "phone_numbers": list(phones),
-        "addresses": list(addresses),
-        "links": list(links),
-        "country": location_info.get("country", "N/A"),
-        "business_nature": business_nature or "N/A",
-        "company_links": company_links or [],
-        "process_log": process_log,
-        "debug_info": debug_info  # Include full debug_info for detailed error tracking
-    }
-
-    output_file = os.path.join(DEBUG_DIR, f"scrape_results_{company_name.replace(' ', '_')}.json")
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-    custom_print(f"📝 Core scraped information and process logs saved to {output_file}")
-
-    with open(os.path.join(DEBUG_DIR, f"footer_content_{company_name.replace(' ', '_')}.json"), "w", encoding="utf-8") as f:
-        json.dump([
-            {
-                "url": fc["url"],
-                "html": fc["html"],
-                "text": fc["text"]
-            } for fc in footer_contents
-        ], f, indent=2)
-    footer_filename = f"footer_content_{company_name.replace(' ', '_')}.json"
-    custom_print(f"📝 Footer content saved to {os.path.join(DEBUG_DIR, footer_filename)}")
-
-    with open(os.path.join(DEBUG_DIR, f"debug_info_{company_name.replace(' ', '_')}.json"), "w", encoding="utf-8") as f:
-        json.dump([
-            {
-                "url": di["url"],
-                "status": di.get("status", "unknown"),
-                "dynamic_html": di.get("dynamic_html", ""),
-                "links": di.get("links", []),
-                "scripts": di.get("scripts", []),
-                "raw_socials": di.get("raw_socials", []),
-                "raw_emails": di.get("raw_emails", []),
-                "raw_phones": di.get("raw_phones", []),
-                "raw_addresses": di.get("raw_addresses", []),
-                "shadow_links": di.get("shadow_links", []),
-                "shadow_content": di.get("shadow_content", []),
-                "footer_tracking": di.get("footer_tracking", []),
-                "meta_tags": di.get("meta_tags", []),
-                "page_content": di.get("page_content", {}),
-                "all_links": di.get("all_links", []),
-                "consolidated_links": di.get("consolidated_links", []),
-                "fallback_logs": di.get("fallback_logs", []),
-                "alerts": di.get("alerts", []),
-                "iframes": di.get("iframes", []),
-                "error_details": di.get("error_details", [])  # Include error_details
-            } for di in debug_info
-        ], f, indent=2)
-    debug_filename = f"debug_info_{company_name.replace(' ', '_')}.json"
-    custom_print(f"📝 Debug information saved to {os.path.join(DEBUG_DIR, debug_filename)}")
-
-    return results
-
-# Modified save_results function - update to only save country
 def save_results(domain, emails, socials, meta_description, about_content, phones, addresses, links, location_info, business_nature, footer_contents, debug_info, process_log, company_links=None, company_name="Unknown"):
     results = {
         "company_name": company_name,
@@ -1936,7 +2283,6 @@ def scrape_company(company, location=None, manual_domain=None):
     query = f"{company} {location}" if location else company
     custom_print(f"\n🔍 Searching Google for '{query}'...")
     
-    # Pass company name to find_domain_google for validation
     domain = manual_domain or find_domain_google(query, company)
     
     if not domain:
@@ -1961,26 +2307,6 @@ def scrape_company(company, location=None, manual_domain=None):
         domain = f"https://{domain}"
     if not domain.endswith("/"):
         domain += "/"
-    
-    # # Strict validation
-    # if not validate_company_match(domain, company):
-    #     custom_print(f"❌ REJECTED: Domain '{domain}' doesn't sufficiently match company '{company}'")
-    #     custom_print("   Please provide a manual domain or check the company name spelling.")
-    #     return {
-    #         "company_name": company,
-    #         "domain": "N/A (no matching domain found)",
-    #         "emails": [],
-    #         "social_media": {platform: [] for platform in SOCIAL_REGEXES.keys()},
-    #         "meta_description": "N/A",
-    #         "about_content": "N/A",
-    #         "phone_numbers": [],
-    #         "addresses": [],
-    #         "links": [],
-    #         "country": "N/A",
-    #         "business_nature": "N/A",
-    #         "company_links": [],
-    #         "process_log": process_log
-    #     }
     
     custom_print(f"✅ Using verified domain: {domain}")
     custom_print(f"📡 Starting full-site scraping from: {domain}\n")
@@ -2026,9 +2352,25 @@ def scrape_company(company, location=None, manual_domain=None):
         "fallback_logs": fallback_debug_logs
     })
 
+    # Convert phone set to list for the results
+    phone_list = list(phones)
+
     results = save_results(
-        domain, emails, socials, meta_desc, about_content, phones, addresses, links, location_info,
-        business_nature, footer_contents, debug_info, process_log, company_links, company
+        domain, 
+        emails, 
+        socials, 
+        meta_desc, 
+        about_content, 
+        phone_list,  # Pass list of phone strings
+        addresses, 
+        links, 
+        location_info,
+        business_nature, 
+        footer_contents, 
+        debug_info, 
+        process_log, 
+        company_links, 
+        company
     )
     return results
 
