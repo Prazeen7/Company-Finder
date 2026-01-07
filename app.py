@@ -47,7 +47,7 @@ CRAWL_DELAY = 0.5
 RETRY_ATTEMPTS = 2
 TIMEOUT = 30
 DEBUG_DIR = "debug_html"
-MODEL_NAME = "Qwen/Qwen2-0.5B-Instruct"
+MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 MAX_SELENIUM_WORKERS = 4
 BATCH_SIZE = 5
 
@@ -129,18 +129,20 @@ app.secret_key = str(uuid.uuid4())
 # Store results globally for export
 current_results = []
 
-# Initialize Qwen Model and Tokenizer
+# Initialize Llama Model Pipeline
 try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        torch_dtype="auto",
-        device_map="auto"
+    import transformers
+    import torch
+
+    pipeline = transformers.pipeline(
+        "text-generation",
+        model=MODEL_NAME,
+        model_kwargs={"torch_dtype": torch.bfloat16},
+        device_map="auto",
     )
 except Exception as e:
-    print(f"❌ Failed to load Qwen model: {e}")
-    model = None
-    tokenizer = None
+    print(f"❌ Failed to load Llama model: {e}")
+    pipeline = None
 
 # Custom print function to capture console output
 process_log = []
@@ -899,12 +901,12 @@ def get_rendered_html(url, driver, retries=RETRY_ATTEMPTS):
     debug_data["status"] = "failed"
     return "", debug_data
 
-# Extract location info with Qwen
+# Extract location info with Llama
 def extract_location_info(text):
-    if not model or not tokenizer:
-        custom_print("❌ Qwen model not loaded, returning N/A for location info")
+    if not pipeline:
+        custom_print("❌ Llama model not loaded, returning N/A for location info")
         return {"country": "N/A"}
-    
+
     input_text = f"Footer and Contact Page Text: {text}"
     prompt = (
         "From the provided text, extract only the country name where the company is located. "
@@ -915,45 +917,34 @@ def extract_location_info(text):
         "For example, if the text mentions 'USA', 'United States', 'Canada', 'UK', 'Germany', etc., use that country name. "
         "Return only the JSON object, no additional text or explanation.\n\n" + input_text
     )
-    
-    messages = [{"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that extracts country information from text."},
+        {"role": "user", "content": prompt}
+    ]
+
     try:
-        generated_ids = model.generate(
-            **model_inputs,
-            max_new_tokens=512
+        outputs = pipeline(
+            messages,
+            max_new_tokens=256,
         )
-        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-        
-        try:
-            index = len(output_ids) - output_ids[::-1].index(151668)
-        except ValueError:
-            index = 0
-        
-        content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-        
-        with open(os.path.join(DEBUG_DIR, "qwen_location_info_output.txt"), "a", encoding="utf-8") as f:
-            f.write(f"Input: {input_text}\nQwen output: {content}\n\n")
-        
+        content = outputs[0]["generated_text"][-1]["content"]
+
+        with open(os.path.join(DEBUG_DIR, "llama_location_info_output.txt"), "a", encoding="utf-8") as f:
+            f.write(f"Input: {input_text}\nLlama output: {content}\n\n")
+
         custom_print(f"🌍 Extracted country info: {content}")
-        
+
         try:
             result = json.loads(content)
             return {
                 "country": result.get("country", "N/A")
             }
         except json.JSONDecodeError:
-            custom_print("❌ Failed to parse Qwen output as JSON")
+            custom_print("❌ Failed to parse Llama output as JSON")
             return {"country": "N/A"}
     except Exception as e:
-        custom_print(f"❌ Error extracting country info with Qwen: {e}")
+        custom_print(f"❌ Error extracting country info with Llama: {e}")
         return {"country": "N/A"}
 
 # Extract information from HTML
@@ -1259,50 +1250,39 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         all_hrefs
     )
 
-# Generate business nature with Qwen
+# Generate business nature with Llama
 def generate_business_nature(meta_desc, about_content):
-    if not model or not tokenizer:
-        custom_print("❌ Qwen model not loaded, returning N/A for business nature")
-        return "N/A (Qwen model not loaded)"
-    
+    if not pipeline:
+        custom_print("❌ Llama model not loaded, returning N/A for business nature")
+        return "N/A (Llama model not loaded)"
+
     input_text = f"Meta Description: {meta_desc}\nAbout Us: {about_content}"
     prompt = (
         "Using the provided Meta Description and About Us content, describe the business nature of the company in one concise sentence. "
         "If no valid Meta Description or About Us content is provided, return 'N/A'. "
         "Do not hallucinate, do not repeat the input text, and return only the sentence as a string.\n\n" + input_text
     )
-    
-    messages = [{"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that describes business nature based on company information."},
+        {"role": "user", "content": prompt}
+    ]
+
     try:
-        generated_ids = model.generate(
-            **model_inputs,
-            max_new_tokens=512
+        outputs = pipeline(
+            messages,
+            max_new_tokens=256,
         )
-        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-        
-        try:
-            index = len(output_ids) - output_ids[::-1].index(151668)
-        except ValueError:
-            index = 0
-        
-        content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-        
-        with open(os.path.join(DEBUG_DIR, "qwen_business_nature_output.txt"), "a", encoding="utf-8") as f:
-            f.write(f"Input: {input_text}\nQwen output: {content}\n\n")
-        
+        content = outputs[0]["generated_text"][-1]["content"]
+
+        with open(os.path.join(DEBUG_DIR, "llama_business_nature_output.txt"), "a", encoding="utf-8") as f:
+            f.write(f"Input: {input_text}\nLlama output: {content}\n\n")
+
         custom_print(f"🏢 Generated business nature: {content}")
         return content
     except Exception as e:
-        custom_print(f"❌ Error generating business nature with Qwen: {e}")
-        return "N/A (Error in Qwen generation)"
+        custom_print(f"❌ Error generating business nature with Llama: {e}")
+        return "N/A (Error in Llama generation)"
     
 def check_with_requests_session(url):
     """Check accessibility using requests with session and headers"""
