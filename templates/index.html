@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Company Information Scraper</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .loading-spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.5s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .slide-down {
+            animation: slideDown 0.3s ease-out;
+        }
+        
+        @keyframes slideDown {
+            from { opacity: 0; max-height: 0; }
+            to { opacity: 1; max-height: 1000px; }
+        }
+        
+        .progress-bar {
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-gray-900 mb-2">Company Information Scraper</h1>
+            <p class="text-lg text-gray-600">Search for detailed company information and contact details</p>
+        </div>
+
+        <!-- Search Form -->
+        <div class="max-w-4xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden mb-8">
+            <div class="bg-white border-b border-gray-200 px-6 py-4">
+                <div class="flex items-center">
+                    <i class="fas fa-search text-blue-600 text-xl mr-3"></i>
+                    <div>
+                        <h2 class="text-xl font-semibold text-gray-900">Search Configuration</h2>
+                        <p class="text-sm text-gray-600">Choose your search type and enter company details</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-6">
+                <form id="search-form" class="space-y-6">
+                    <!-- Search Type Selection -->
+                    <div class="space-y-2">
+                        <label for="search_type" class="block text-sm font-medium text-gray-700">Search Type</label>
+                        <select id="search_type" name="search_type" onchange="toggleSearchType()"
+                                 class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors">
+                            <option value="single">Single Company</option>
+                            <option value="batch_5">Batch of 5 Companies</option>
+                            <option value="batch_10">Batch of 10 Companies</option>
+                        </select>
+                    </div>
+
+                    <hr class="border-gray-200">
+
+                    <!-- Single Search -->
+                    <div id="single_search" class="slide-down">
+                        <div class="bg-green-50 border-l-4 border-green-500 rounded-lg p-6">
+                            <div class="flex items-center mb-4">
+                                <i class="fas fa-building text-green-600 text-lg mr-2"></i>
+                                <h3 class="text-lg font-semibold text-gray-900">Single Company Search</h3>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                                <div class="space-y-2">
+                                    <label for="company" class="block text-sm font-medium text-gray-700">Company Name *</label>
+                                    <input type="text" id="company" name="company"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                            placeholder="Enter company name">
+                                </div>
+                                <div class="space-y-2">
+                                    <label for="location" class="block text-sm font-medium text-gray-700">Location (City/Country) <span class="text-gray-400">(Optional)</span></label>
+                                    <input type="text" id="location" name="location"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                            placeholder="Enter city/country (optional)">
+                                </div>
+                            </div>
+                            <div class="space-y-2">
+                                <label for="manual_domain" class="block text-sm font-medium text-gray-700">Manual Domain <span class="text-gray-400">(Optional)</span></label>
+                                <input type="text" id="manual_domain" name="manual_domain"
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                        placeholder="Enter domain manually (e.g., https://example.com)">
+                                <p class="text-xs text-gray-500">If you know the exact domain, enter it here to skip Google search</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Batch 5 Search -->
+                    <div id="batch_5" style="display: none;" class="slide-down">
+                        <div class="bg-blue-50 border-l-4 border-blue-500 rounded-lg p-6">
+                            <div class="flex items-center mb-4">
+                                <i class="fas fa-building text-blue-600 text-lg mr-2"></i>
+                                <h3 class="text-lg font-semibold text-gray-900">Batch Search - 5 Companies</h3>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div class="space-y-2">
+                                    <label for="companies_batch_5" class="block text-sm font-medium text-gray-700">Company Names *</label>
+                                    <textarea id="companies_batch_5" name="companies_batch_5" rows="5"
+                                              class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                              placeholder="Enter up to 5 company names (one per line or comma-separated)&#10;Example:&#10;Apple Inc&#10;Microsoft Corporation&#10;Google LLC"></textarea>
+                                    <p class="text-xs text-gray-500">Enter up to 5 company names, one per line or separated by commas</p>
+                                </div>
+                                <div class="space-y-2">
+                                    <label for="locations_batch_5" class="block text-sm font-medium text-gray-700">Locations <span class="text-gray-400">(Optional)</span></label>
+                                    <textarea id="locations_batch_5" name="locations_batch_5" rows="5"
+                                              class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                              placeholder="Enter locations (one per line or comma-separated)&#10;Example:&#10;Cupertino, CA&#10;Redmond, WA&#10;Mountain View, CA"></textarea>
+                                    <p class="text-xs text-gray-500">Enter locations corresponding to companies above (optional)</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Batch 10 Search -->
+                    <div id="batch_10" style="display: none;" class="slide-down">
+                        <div class="bg-blue-50 border-l-4 border-blue-500 rounded-lg p-6">
+                            <div class="flex items-center mb-4">
+                                <i class="fas fa-building text-blue-600 text-lg mr-2"></i>
+                                <h3 class="text-lg font-semibold text-gray-900">Batch Search - 10 Companies</h3>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div class="space-y-2">
+                                    <label for="companies_batch_10" class="block text-sm font-medium text-gray-700">Company Names *</label>
+                                    <textarea id="companies_batch_10" name="companies_batch_10" rows="10"
+                                              class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                              placeholder="Enter up to 10 company names (one per line or comma-separated)&#10;Example:&#10;Apple Inc&#10;Microsoft Corporation&#10;Google LLC&#10;Amazon&#10;Facebook"></textarea>
+                                    <p class="text-xs text-gray-500">Enter up to 10 company names, one per line or separated by commas</p>
+                                </div>
+                                <div class="space-y-2">
+                                    <label for="locations_batch_10" class="block text-sm font-medium text-gray-700">Locations <span class="text-gray-400">(Optional)</span></label>
+                                    <textarea id="locations_batch_10" name="locations_batch_10" rows="10"
+                                              class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                                              placeholder="Enter locations (one per line or comma-separated)&#10;Example:&#10;Cupertino, CA&#10;Redmond, WA&#10;Mountain View, CA&#10;Seattle, WA&#10;Menlo Park, CA"></textarea>
+                                    <p class="text-xs text-gray-500">Enter locations corresponding to companies above (optional)</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div class="flex justify-center pt-4">
+                        <button type="submit" id="submit-btn"
+                                class="inline-flex items-center px-8 py-3 bg-blue-600 text-white font-medium rounded-lg shadow-sm hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                            <i class="fas fa-search mr-2"></i>
+                            Search
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Loading Section -->
+        <div id="loading" class="hidden max-w-4xl mx-auto">
+            <div class="bg-white rounded-xl shadow-lg p-8">
+                <div class="text-center mb-6">
+                    <div class="flex items-center justify-center mb-4">
+                        <div class="loading-spinner mr-3"></div>
+                        <span class="text-lg font-medium text-gray-700">Searching for companies...</span>
+                    </div>
+                    <p id="progress-text" class="text-gray-500 mb-4">Initializing search...</p>
+                </div>
+                
+                <!-- Progress Bar -->
+                <div class="w-full bg-gray-200 rounded-full h-2 mb-4">
+                    <div id="progress-bar" class="progress-bar bg-blue-600 h-2 rounded-full"></div>
+                </div>
+                
+                <div class="text-center text-sm text-gray-400">
+                    <p>This process may take several minutes depending on the complexity of the search.</p>
+                    <p class="mt-1">Please do not close this window.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="results" class="hidden max-w-6xl mx-auto">
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-3xl font-bold text-gray-900">Search Results</h2>
+                    <p id="results-count" class="text-lg text-gray-600">Found 0 companies</p>
+                </div>
+                <div class="flex space-x-3">
+                    <button id="export-excel-btn" onclick="exportToExcel()"
+                            class="inline-flex items-center px-4 py-2 bg-green-600 text-white font-medium rounded-lg shadow-sm hover:bg-green-700 focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors">
+                        <i class="fas fa-file-excel mr-2"></i>
+                        Export to Excel
+                    </button>
+                    <button onclick="exportToJSON()"
+                            class="inline-flex items-center px-4 py-2 bg-purple-600 text-white font-medium rounded-lg shadow-sm hover:bg-purple-700 focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-colors">
+                        <i class="fas fa-file-code mr-2"></i>
+                        Export to JSON
+                    </button>
+                </div>
+            </div>
+            <div id="results-container"></div>
+        </div>
+    </div>
+
+    <script>
+        let isSearching = false;
+        let currentResults = [];
+
+        function toggleSearchType() {
+            const searchType = document.getElementById('search_type').value;
+            
+            document.getElementById('single_search').style.display = searchType === 'single' ? 'block' : 'none';
+            document.getElementById('batch_5').style.display = searchType === 'batch_5' ? 'block' : 'none';
+            document.getElementById('batch_10').style.display = searchType === 'batch_10' ? 'block' : 'none';
+        }
+
+        function showLoading() {
+            const loadingDiv = document.getElementById('loading');
+            const resultsDiv = document.getElementById('results');
+            const submitBtn = document.getElementById('submit-btn');
+            
+            loadingDiv.classList.remove('hidden');
+            resultsDiv.classList.add('hidden');
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<div class="loading-spinner mr-2"></div>Searching...';
+            isSearching = true;
+        }
+
+        function hideLoading() {
+            const loadingDiv = document.getElementById('loading');
+            const submitBtn = document.getElementById('submit-btn');
+            
+            loadingDiv.classList.add('hidden');
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-search mr-2"></i>Search';
+            isSearching = false;
+        }
+
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            const bgColor = type === 'error' ? 'bg-red-100 border-red-400 text-red-700' :
+                            type === 'success' ? 'bg-green-100 border-green-400 text-green-700' :
+                           'bg-blue-100 border-blue-400 text-blue-700';
+            
+            notification.className = `fixed top-4 right-4 ${bgColor} px-4 py-3 rounded shadow-lg z-50 max-w-md`;
+            notification.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center">
+                        <i class="fas fa-${type === 'error' ? 'exclamation-triangle' : type === 'success' ? 'check-circle' : 'info-circle'} mr-2"></i>
+                        <span>${message}</span>
+                    </div>
+                    <button onclick="this.parentElement.parentElement.remove()" class="ml-4 hover:opacity-70">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `;
+            
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                if (notification.parentElement) {
+                    notification.remove();
+                }
+            }, 5000);
+        }
+
+        function displayResults(results, isBatch = false) {
+            const resultsDiv = document.getElementById('results');
+            const resultsContainer = document.getElementById('results-container');
+            const resultsCount = document.getElementById('results-count');
+            
+            currentResults = results;
+            
+            if (!results || results.length === 0) {
+                resultsContainer.innerHTML = `
+                    <div class="bg-white rounded-xl shadow-lg text-center py-12">
+                        <div class="text-gray-500 text-lg mb-2">
+                            <i class="fas fa-search text-4xl mb-4 text-gray-300"></i>
+                            <div>No results found</div>
+                        </div>
+                        <p class="text-gray-400">Try adjusting your search criteria</p>
+                    </div>
+                `;
+                resultsCount.textContent = 'Found 0 companies';
+            } else {
+                resultsCount.textContent = `Found ${results.length} companies`;
+                
+                let html = '<div class="space-y-6">';
+                
+                results.forEach((result, index) => {
+                    const socialMedia = result.social_media || {};
+                    const emails = result.emails || [];
+                    const phones = result.phone_numbers || [];
+                    const companyLinks = result.company_links || [];
+                    
+                    html += `
+                        <div class="bg-white rounded-xl shadow-lg p-6">
+                            <div class="flex items-start justify-between mb-4">
+                                <div>
+                                    <h3 class="text-xl font-bold text-gray-900 mb-2">
+                                        ${result.company_name || 'Unknown Company'}
+                                        ${isBatch ? `<span class="text-sm font-normal text-gray-500">(#${result.serial_no || index + 1})</span>` : ''}
+                                    </h3>
+                                    <div class="flex items-center text-gray-600 mb-2">
+                                        <i class="fas fa-globe mr-2"></i>
+                                        <a href="${result.domain}" target="_blank" class="text-blue-600 hover:underline">
+                                            ${result.domain || 'N/A'}
+                                        </a>
+                                    </div>
+                                    <div class="flex items-center text-gray-600">
+                                        <i class="fas fa-map-marker-alt mr-2"></i>
+                                        <span>${result.city || 'N/A'}, ${result.country || 'N/A'}</span>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                        <i class="fas fa-check-circle mr-1"></i>
+                                        Scraped
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                <!-- Contact Information -->
+                                <div class="space-y-3">
+                                    <h4 class="font-semibold text-gray-900 flex items-center">
+                                        <i class="fas fa-address-book mr-2 text-blue-600"></i>
+                                        Contact Information
+                                    </h4>
+                                    <div class="space-y-2">
+                                        <div>
+                                            <span class="text-sm font-medium text-gray-700">Emails:</span>
+                                            <div class="text-sm text-gray-600">
+                                                ${emails.length > 0 ? emails.map(email => `<div><a href="mailto:${email}" class="text-blue-600 hover:underline">${email}</a></div>`).join('') : '<div>N/A</div>'}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <span class="text-sm font-medium text-gray-700">Phones:</span>
+                                            <div class="text-sm text-gray-600">
+                                                ${phones.length > 0 ? phones.map(phone => `<div><a href="tel:${phone}" class="text-blue-600 hover:underline">${phone}</a></div>`).join('') : '<div>N/A</div>'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Social Media -->
+                                <div class="space-y-3">
+                                    <h4 class="font-semibold text-gray-900 flex items-center">
+                                        <i class="fas fa-share-alt mr-2 text-purple-600"></i>
+                                        Social Media
+                                    </h4>
+                                    <div class="space-y-2">
+                                        ${Object.entries(socialMedia).map(([platform, links]) => `
+                                            <div>
+                                                <span class="text-sm font-medium text-gray-700 capitalize">${platform}:</span>
+                                                <div class="text-sm text-gray-600">
+                                                    ${links && links.length > 0 ? links.map(link => `<div><a href="${link}" target="_blank" class="text-blue-600 hover:underline">${link}</a></div>`).join('') : '<div>N/A</div>'}
+                                                </div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                                
+                                <!-- Business Information -->
+                                <div class="space-y-3">
+                                    <h4 class="font-semibold text-gray-900 flex items-center">
+                                        <i class="fas fa-building mr-2 text-green-600"></i>
+                                        Business Information
+                                    </h4>
+                                    <div class="space-y-2">
+                                        <div>
+                                            <span class="text-sm font-medium text-gray-700">Business Nature:</span>
+                                            <div class="text-sm text-gray-600">${result.business_nature || 'N/A'}</div>
+                                        </div>
+                                        <div>
+                                            <span class="text-sm font-medium text-gray-700">Description:</span>
+                                            <div class="text-sm text-gray-600">${result.meta_description || 'N/A'}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            ${companyLinks.length > 0 ? `
+                                <div class="mt-6 pt-4 border-t border-gray-200">
+                                    <h4 class="font-semibold text-gray-900 mb-2 flex items-center">
+                                        <i class="fas fa-link mr-2 text-orange-600"></i>
+                                        Related Links
+                                    </h4>
+                                    <div class="flex flex-wrap gap-2">
+                                        ${companyLinks.slice(0, 5).map(link => `
+                                            <a href="${link}" target="_blank" class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800 hover:bg-gray-200 transition-colors">
+                                                <i class="fas fa-external-link-alt mr-1"></i>
+                                                ${new URL(link).hostname}
+                                            </a>
+                                        `).join('')}
+                                        ${companyLinks.length > 5 ? `<span class="text-xs text-gray-500">+${companyLinks.length - 5} more</span>` : ''}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                });
+                
+                html += '</div>';
+                resultsContainer.innerHTML = html;
+            }
+            
+            resultsDiv.classList.remove('hidden');
+            resultsDiv.classList.add('fade-in');
+        }
+
+        function exportToExcel() {
+            if (!currentResults || currentResults.length === 0) {
+                showNotification('No results to export', 'error');
+                return;
+            }
+            
+            const exportBtn = document.getElementById('export-excel-btn');
+            const originalText = exportBtn.innerHTML;
+            exportBtn.innerHTML = '<div class="loading-spinner mr-2"></div>Exporting...';
+            exportBtn.disabled = true;
+            
+            fetch('/export/excel', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ results: currentResults })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Export failed');
+                }
+                return response.blob();
+            })
+            .then(blob => {
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = `company_scraper_results_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                showNotification('Excel file downloaded successfully!', 'success');
+            })
+            .catch(error => {
+                console.error('Export error:', error);
+                showNotification('Failed to export Excel file', 'error');
+            })
+            .finally(() => {
+                exportBtn.innerHTML = originalText;
+                exportBtn.disabled = false;
+            });
+        }
+
+        function exportToJSON() {
+            if (!currentResults || currentResults.length === 0) {
+                showNotification('No results to export', 'error');
+                return;
+            }
+            
+            const dataStr = JSON.stringify(currentResults, null, 2);
+            const dataBlob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `company_scraper_results_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            showNotification('JSON file downloaded successfully!', 'success');
+        }
+
+        // Main form submission handler
+        document.getElementById('search-form').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            
+            if (isSearching) {
+                return;
+            }
+            
+            const searchType = document.getElementById('search_type').value;
+            const formData = new FormData();
+            formData.append('search_type', searchType);
+            
+            try {
+                if (searchType === 'single') {
+                    const company = document.getElementById('company').value.trim();
+                    const location = document.getElementById('location').value.trim();
+                    const manualDomain = document.getElementById('manual_domain').value.trim();
+                    
+                    if (!company) {
+                        showNotification('Please enter a company name.', 'error');
+                        return;
+                    }
+                    
+                    formData.append('company', company);
+                    formData.append('location', location);
+                    formData.append('manual_domain', manualDomain);
+                    
+                } else if (searchType === 'batch_5' || searchType === 'batch_10') {
+                    const companiesElement = document.getElementById(`companies_${searchType}`);
+                    const locationsElement = document.getElementById(`locations_${searchType}`);
+                    
+                    if (!companiesElement) {
+                        showNotification(`Companies input field not found for ${searchType}`, 'error');
+                        return;
+                    }
+                    
+                    const companiesText = companiesElement.value.trim();
+                    const locationsText = locationsElement ? locationsElement.value.trim() : '';
+                    
+                    if (!companiesText) {
+                        showNotification('Please enter at least one company name.', 'error');
+                        return;
+                    }
+                    
+                    // Parse companies (split by newlines or commas)
+                    const companies = companiesText.split(/[\n,]+/).map(c => c.trim()).filter(c => c);
+                    const locations = locationsText ? locationsText.split(/[\n,]+/).map(l => l.trim()).filter(l => l) : [];
+                    
+                    const maxCount = searchType === 'batch_5' ? 5 : 10;
+                    if (companies.length === 0) {
+                        showNotification(`Please enter at least one company name for ${searchType.replace('_', ' ')} search.`, 'error');
+                        return;
+                    }
+                    if (companies.length > maxCount) {
+                        showNotification(`Too many companies entered. Maximum allowed for ${searchType.replace('_', ' ')} is ${maxCount}.`, 'error');
+                        return;
+                    }
+                    
+                    // Add companies and locations to form data
+                    companies.forEach((company, index) => {
+                        formData.append(`company_${index}`, company);
+                        if (locations[index]) {
+                            formData.append(`location_${index}`, locations[index]);
+                        }
+                    });
+                }
+                
+                showLoading();
+                
+                const response = await fetch('/search', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                hideLoading();
+                
+                if (data.error) {
+                    showNotification(data.error, 'error');
+                } else {
+                    displayResults(data.results || [data], searchType !== 'single');
+                    showNotification(`Successfully found information for ${data.results ? data.results.length : 1} companies!`, 'success');
+                }
+                
+            } catch (error) {
+                hideLoading();
+                showNotification('An error occurred while searching. Please try again.', 'error');
+                console.error('Search error:', error);
+            }
+        });
+
+        // Initialize on page load
+        window.onload = function() {
+            toggleSearchType();
+        }
+    </script>
+</body>
+</html>
