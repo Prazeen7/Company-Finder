@@ -527,10 +527,10 @@ def find_domain_google(query, company_name=None):
     # Try multiple search queries
     search_queries = [
         query,  # Original query
-        f"{company_name} website",  # Add "website" keyword
-        f"{company_name} official website",  # Add "official website"
-        f"{company_clean.replace(' ', '')}.com",  # Try domain pattern
-        f"{company_clean} com",  # Try with "com"
+        f"{company_name} website",
+        f"{company_name} official website",
+        f"{company_clean.replace(' ', '')}.com",
+        f"{company_clean} com",
     ]
     
     all_domains = []
@@ -559,67 +559,104 @@ def find_domain_google(query, company_name=None):
                     
                     domain = f"{parsed.scheme}://{parsed.netloc}/"
                     
-                    # Extract domain without TLD and www for matching
+                    # Extract domain base more accurately
                     domain_base = re.sub(r'^www\.', '', domain_name)
-                    domain_base = re.sub(r'\.(com|org|net|io|co|in|us|uk|au|ca|de|fr|jp|biz|info|mobi|name|tv|cc|ws)$', '', domain_base)
                     
-                    # Check if this domain matches the company
+                    # Better TLD removal that handles multi-part TLDs
+                    tld_pattern = r'\.(com|org|net|io|co|in|us|uk|au|ca|de|fr|jp|biz|info|mobi|name|tv|cc|ws|co\.uk|com\.np|co\.in|com\.au|gov|edu|mil|np)$'
+                    domain_base = re.sub(tld_pattern, '', domain_base)
+                    
+                    # Better subdomain detection
+                    is_subdomain = '.' in domain_base
+                    
+                    # Check domain structure
+                    domain_parts = domain_name.replace('www.', '').split('.')
+                    is_main_domain = len(domain_parts) <= 2 or (len(domain_parts) == 3 and domain_parts[-2] in ['co', 'com'])
+                    
+                    # IMPROVED MATCHING LOGIC
                     matches_company = False
                     match_score = 0
+                    exact_match = False
                     
                     if company_words:
-                        matches = []
-                        for word in company_words:
-                            if len(word) > 3 and word in domain_base:
-                                matches.append(word)
-                                match_score += 10
-                        
-                        # Also check for combined words
+                        # PRIORITY 1: Check for exact combined match (no spaces)
                         company_combined = company_clean.replace(" ", "")
-                        if company_combined in domain_base:
-                            match_score += 50  # Big bonus for exact combined match
+                        company_combined_dash = company_clean.replace(" ", "-")
+                        
+                        if domain_base == company_combined or domain_base == company_combined_dash:
+                            match_score += 100  # HIGHEST priority for EXACT match
                             matches_company = True
-                        elif len(matches) >= len(company_words):
-                            match_score += 30  # All words match
-                            matches_company = True
-                        elif len(matches) > 0:
-                            match_score += 15  # Some words match
+                            exact_match = True
+                            custom_print(f"    ✅✅✅ EXACT MATCH: {domain_base} == {company_combined}")
+                        
+                        # PRIORITY 2: Check if domain contains exact combined company name
+                        elif company_combined in domain_base or company_combined_dash in domain_base:
+                            # Check if it's the full domain or just a prefix/suffix
+                            if domain_base.startswith(company_combined) or domain_base.startswith(company_combined_dash):
+                                match_score += 70  # High score but penalize for extra suffix
+                                matches_company = True
+                                custom_print(f"    ✅✅ PREFIX MATCH: {domain_base} starts with {company_combined}")
+                            else:
+                                match_score += 50  # Lower if company name is in middle
+                                matches_company = True
+                                custom_print(f"    ✅ CONTAINS MATCH: {domain_base} contains {company_combined}")
+                        
+                        # PRIORITY 3: Check individual words (ONLY if no exact match)
+                        else:
+                            matches = []
+                            for word in company_words:
+                                if len(word) > 3 and word in domain_base:
+                                    matches.append(word)
+                                    match_score += 8  # Lower score for individual words
+                            
+                            if len(matches) >= len(company_words):
+                                match_score += 20  # All words present but not combined
+                                matches_company = True
+                                custom_print(f"    ⚠️ PARTIAL MATCH: {domain_base} contains words: {matches}")
+                            elif len(matches) > 0:
+                                match_score += 10  # Some words match
+                                custom_print(f"    ⚠️ WEAK MATCH: {domain_base} contains some words: {matches}")
                     
                     # Check title and snippet for company mention
                     for word in company_words:
                         if word in title:
-                            match_score += 5
-                        if word in snippet:
                             match_score += 3
+                        if word in snippet:
+                            match_score += 2
                     
-                    # NEW: Penalize subdomains and specific paths
-                    # Check if this is likely NOT the main domain
-                    is_subdomain = '.' in domain_base.replace('.com', '')  # Has dots besides TLD
+                    # Check if title contains the exact company name
+                    if company_clean in title:
+                        match_score += 15
+                        custom_print(f"    📄 Title contains exact company name")
+                    
+                    # Better subdomain penalty logic
                     common_subdomains = ['returns', 'shop', 'store', 'blog', 'support', 'help', 
-                                        'app', 'portal', 'account', 'login', 'admin', 'secure']
+                                        'app', 'portal', 'account', 'login', 'admin', 'secure',
+                                        'order', 'tracking', 'shipping', 'delivery', 'exchange']
                     
-                    # Check if domain contains common subdomain patterns
                     if is_subdomain:
-                        for subdomain in common_subdomains:
-                            if subdomain in domain_base:
-                                match_score -= 30  # Heavy penalty for common subdomains
-                                break
+                        subdomain_prefix = domain_base.split('.')[0]
+                        if subdomain_prefix in common_subdomains:
+                            match_score -= 50
+                            custom_print(f"    ⚠️ Service subdomain penalty: {subdomain_prefix}")
                         else:
-                            match_score -= 15  # General penalty for other subdomains
+                            match_score -= 20
+                            custom_print(f"    ⚠️ Subdomain penalty")
                     
-                    # Bonus for being likely main domain
-                    if not is_subdomain and domain_name.count('.') == 1:
-                        match_score += 20  # Bonus for simple main domain (e.g., example.com)
+                    # Bonus for main domain
+                    if is_main_domain and not is_subdomain:
+                        match_score += 25
+                        custom_print(f"    ✅ Main domain bonus")
                     
-                    # Bonus for being homepage or root path
+                    # Bonus for homepage or root path
                     path = parsed.path
                     if path in ['/', '/index.html', '/index.php', '']:
                         match_score += 10
                     
-                    # Check if it looks like a returns/order management page
+                    # Penalty for returns/order pages
                     if any(keyword in link.lower() or keyword in title for keyword in 
                           ['returns', 'order', 'tracking', 'shipping', 'delivery', 'exchange']):
-                        match_score -= 25  # Penalty for returns/order pages
+                        match_score -= 25
                     
                     # Skip very low scoring domains
                     if match_score < 5:
@@ -628,18 +665,21 @@ def find_domain_google(query, company_name=None):
                     domain_info = {
                         'domain': domain,
                         'domain_name': domain_name,
+                        'domain_base': domain_base,
                         'title': title[:100],
                         'match_score': match_score,
                         'matches_company': matches_company,
+                        'exact_match': exact_match,
                         'search_query': search_query,
                         'is_subdomain': is_subdomain,
-                        'is_main_domain': (not is_subdomain and domain_name.count('.') == 1)
+                        'is_main_domain': is_main_domain
                     }
                     
                     # Check if we already have this domain
                     if not any(d['domain'] == domain for d in all_domains):
                         all_domains.append(domain_info)
-                        custom_print(f"    Found: {domain_name} (score: {match_score}, main: {domain_info['is_main_domain']})")
+                        match_type = "EXACT MATCH" if exact_match else ("MAIN DOMAIN" if (is_main_domain and not is_subdomain) else "SUBDOMAIN")
+                        custom_print(f"    Found: {domain_name} (score: {match_score}, type: {match_type})")
                 
                 break  # Successfully got results with this API key
                 
@@ -654,8 +694,13 @@ def find_domain_google(query, company_name=None):
                 custom_print(f"❌ Google API error with key {api_key}: {e}")
                 continue
     
-    # Sort domains by match score, prioritizing main domains
-    all_domains.sort(key=lambda x: (x['match_score'], x['is_main_domain']), reverse=True)
+    # Sort domains: EXACT MATCHES FIRST, then by score, then main domains over subdomains
+    all_domains.sort(key=lambda x: (
+        x['exact_match'],  # Exact matches first
+        x['match_score'],  # Then by score
+        x['is_main_domain'],  # Then main domains
+        not x['is_subdomain']  # Then non-subdomains
+    ), reverse=True)
     
     custom_print(f"\n📊 Search Results Analysis:")
     custom_print(f"  Total domains found: {len(all_domains)}")
@@ -663,24 +708,37 @@ def find_domain_google(query, company_name=None):
     if all_domains:
         custom_print(f"\n✅ Top matching domains:")
         for i, domain_info in enumerate(all_domains[:5], 1):
-            domain_type = "MAIN" if domain_info['is_main_domain'] else "subdomain"
+            if domain_info['exact_match']:
+                domain_type = "⭐ EXACT MATCH"
+            elif domain_info['is_main_domain'] and not domain_info['is_subdomain']:
+                domain_type = "MAIN DOMAIN"
+            else:
+                domain_type = "SUBDOMAIN"
             custom_print(f"  {i}. {domain_info['domain']} (score: {domain_info['match_score']}, type: {domain_type})")
+            custom_print(f"     Domain base: {domain_info['domain_base']}")
             custom_print(f"     Title: {domain_info['title']}")
         
         # Return the best matching domain
         best = all_domains[0]
         
-        # Check if we should skip subdomains with certain patterns
-        skip_subdomains = ['returns', 'order', 'tracking', 'shipping']
-        if best['is_subdomain'] and any(pattern in best['domain_name'] for pattern in skip_subdomains):
-            custom_print(f"⚠️ Best domain is a returns/order subdomain: {best['domain_name']}")
-            # Try to find a better alternative
-            for domain_info in all_domains[1:]:
-                if domain_info['is_main_domain'] and domain_info['match_score'] >= 20:
-                    custom_print(f"✅ Using alternative main domain: {domain_info['domain']}")
-                    return domain_info['domain']
+        # If we have an exact match, always use it
+        if best['exact_match']:
+            custom_print(f"\n⭐⭐⭐ Using EXACT MATCH domain: {best['domain']} (score: {best['match_score']})")
+            return best['domain']
         
-        if best['match_score'] >= 20:  # Reasonable threshold
+        # Better subdomain filtering
+        skip_subdomains = ['returns', 'order', 'tracking', 'shipping', 'shop', 'store']
+        if best['is_subdomain']:
+            subdomain_prefix = best['domain_base'].split('.')[0] if '.' in best['domain_base'] else ''
+            if subdomain_prefix in skip_subdomains:
+                custom_print(f"⚠️ Best domain is a service subdomain: {best['domain_name']}")
+                # Try to find a main domain alternative or exact match
+                for domain_info in all_domains[1:]:
+                    if domain_info['exact_match'] or (domain_info['is_main_domain'] and not domain_info['is_subdomain'] and domain_info['match_score'] >= 30):
+                        custom_print(f"✅ Using alternative domain: {domain_info['domain']}")
+                        return domain_info['domain']
+        
+        if best['match_score'] >= 20:
             custom_print(f"\n✅ Using best matching domain: {best['domain']} (score: {best['match_score']})")
             return best['domain']
         else:
@@ -691,10 +749,12 @@ def find_domain_google(query, company_name=None):
     custom_print("❌ No suitable domains found in any search")
     
     # Fallback: Try direct domain construction
-    if company_words and len(company_words) >= 2:
+    if company_words:
         possible_domains = [
             f"https://{company_clean.replace(' ', '').lower()}.com",
             f"https://{company_clean.replace(' ', '-').lower()}.com",
+            f"https://{company_clean.replace(' ', '').lower()}.com.np",
+            f"https://{company_clean.replace(' ', '').lower()}.np",
             f"https://www.{company_clean.replace(' ', '').lower()}.com",
             f"https://www.{company_clean.replace(' ', '-').lower()}.com",
         ]
@@ -1187,6 +1247,113 @@ Return ONLY the JSON object, no additional text."""
     except Exception as e:
         custom_print(f"❌ Error extracting country info: {e}")
         return {"country": "N/A"}
+
+# Extract first few paragraphs from HTML
+def extract_paragraphs_from_html(html, max_paragraphs=5, min_length=50):
+    """
+    Extract first few meaningful paragraphs from HTML content
+
+    Args:
+        html: HTML content to extract from
+        max_paragraphs: Maximum number of paragraphs to extract
+        min_length: Minimum length of paragraph to consider
+
+    Returns:
+        String containing concatenated paragraphs
+    """
+    try:
+        soup = BeautifulSoup(html, "lxml")
+
+        # Remove script, style, and other non-content elements
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'meta', 'link']):
+            tag.decompose()
+
+        paragraphs = []
+
+        # Try to find paragraphs in common content areas first
+        content_areas = soup.find_all(['article', 'main', 'div'], class_=re.compile(r'content|about|main|article', re.I))
+
+        # If content areas found, search within them, otherwise search whole page
+        search_area = content_areas[0] if content_areas else soup
+
+        # Extract paragraphs
+        for p in search_area.find_all('p'):
+            text = p.get_text(strip=True)
+            # Filter out short paragraphs, navigation text, etc.
+            if len(text) >= min_length and not text.lower().startswith(('cookie', 'privacy', 'terms')):
+                paragraphs.append(text)
+                if len(paragraphs) >= max_paragraphs:
+                    break
+
+        # If not enough paragraphs found, try divs and sections
+        if len(paragraphs) < max_paragraphs:
+            for tag in search_area.find_all(['div', 'section']):
+                text = tag.get_text(strip=True)
+                # Avoid duplicates and too large blocks
+                if (len(text) >= min_length and len(text) < 1000 and
+                    text not in paragraphs and
+                    not text.lower().startswith(('cookie', 'privacy', 'terms'))):
+                    paragraphs.append(text)
+                    if len(paragraphs) >= max_paragraphs:
+                        break
+
+        result = " ".join(paragraphs[:max_paragraphs])
+        custom_print(f"📝 Extracted {len(paragraphs)} paragraphs ({len(result)} chars)")
+        return result
+
+    except Exception as e:
+        custom_print(f"❌ Error extracting paragraphs: {e}")
+        return ""
+
+# Fetch and extract text from about page URL
+def fetch_about_page_content(url, timeout=10):
+    """
+    Fetch an about page and extract meaningful text content
+
+    Args:
+        url: URL of the about page
+        timeout: Request timeout in seconds
+
+    Returns:
+        Extracted text from the about page
+    """
+    try:
+        custom_print(f"🔍 Fetching about page: {url}")
+
+        # Create a session with retries
+        session = requests.Session()
+        retries = Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+        session.mount('http://', HTTPAdapter(max_retries=retries))
+
+        headers = {
+            'User-Agent': random.choice(USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+
+        response = session.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        response.raise_for_status()
+
+        # Extract paragraphs from the fetched HTML
+        content = extract_paragraphs_from_html(response.text, max_paragraphs=5, min_length=50)
+
+        if content:
+            custom_print(f"✅ Successfully extracted {len(content)} chars from about page")
+            return content
+        else:
+            custom_print(f"⚠️ No meaningful content found on about page")
+            return ""
+
+    except requests.Timeout:
+        custom_print(f"⏱️ Timeout fetching about page: {url}")
+        return ""
+    except requests.RequestException as e:
+        custom_print(f"❌ Error fetching about page {url}: {e}")
+        return ""
+    except Exception as e:
+        custom_print(f"❌ Unexpected error fetching about page: {e}")
+        return ""
 
 # Extract information from HTML
 def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown", debug_data=None):
@@ -1965,8 +2132,16 @@ def crawl_website(domain, max_depth=MAX_DEPTH):
             if desc and not meta_description:
                 meta_description = desc
                 custom_print(f"📝 Found meta description on {url}")
-            
-            if page_about_content and len(page_about_content) > len(about_content):
+
+            # If this is an about page, fetch it separately and extract paragraphs
+            about_keywords = ['about', 'story', 'mission', 'vision', 'who-we-are', 'our-company', 'our-team', 'company-info']
+            if any(keyword in url.lower() for keyword in about_keywords):
+                custom_print(f"🔍 Detected about page URL: {url}")
+                fetched_about_content = fetch_about_page_content(url)
+                if fetched_about_content and len(fetched_about_content) > len(about_content):
+                    about_content = fetched_about_content
+                    custom_print(f"📝 Found about content from dedicated fetch on {url} ({len(fetched_about_content)} chars)")
+            elif page_about_content and len(page_about_content) > len(about_content):
                 about_content = page_about_content
                 custom_print(f"📝 Found about content on {url} ({len(page_about_content)} chars)")
             
