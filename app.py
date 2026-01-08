@@ -242,216 +242,56 @@ def validate_phone_with_country_code(phone):
 # Identify About/Contact links using Llama
 def identify_about_contact_links(links):
     """
-    Use Llama to identify which links are About Us or Contact Us pages
-    
-    Args:
-        links: List of dicts with 'url' and 'text' keys
-    
-    Returns:
-        Dict with 'about' and 'contact' lists containing identified links
+    Simple keyword matching for About Us and Contact Us pages
+    Just check if URL contains 'about' or 'contact' keywords
     """
-    if not pipeline or not links:
-        custom_print("❌ Llama model not loaded or no links provided")
-        return {"about": [], "contact": []}
+    custom_print(f"🔍 Simple keyword matching for About/Contact pages from {len(links)} links")
     
-    # First, deduplicate links by URL
-    unique_links = []
-    unique_urls = set()
-    filtered_indices = []
+    about_links = []
+    contact_links = []
     
-    for i, link in enumerate(links):
-        url = link.get('url', '').split('?')[0]  # Remove query parameters for deduplication
-        if url not in unique_urls:
-            unique_urls.add(url)
-            unique_links.append(link)
-            filtered_indices.append(i)  # Store the original index
+    # Keep track of unique URLs
+    seen_urls = set()
     
-    custom_print(f"🔍 Unique links after deduplication: {len(unique_links)} out of {len(links)}")
-    
-    # Pre-filtering logic with protected keywords
-    about_keywords = [
-        'about', 'story', 'team', 'company', 'mission', 'vision', 
-        'who-we-are', 'our-story', 'our-team', 'our-mission', 'history', 
-        'leadership', 'values', 'meet-the-team', 'meet-us', 'who-are-we', 
-        'culture', 'philosophy'
-    ]
-    
-    contact_keywords = [
-        'contact', 'get-in-touch', 'reach-us', 'support', 'help', 
-        'customer-service', 'contact-us', 'reach-out', 'talk-to-us', 
-        'customer-support', 'assistance', 'inquiries', 'feedback', 
-        'get-help', 'support-center'
-    ]
-    
-    exclude_keywords = [
-        'product', 'cart', 'checkout', 'login', 'register', 'sign-in', 
-        'sign-up', 'account', 'wishlist', 'shop', 'collection', 'category', 
-        'search', 'filter', 'sort', 'view', 'add-to-cart', 'buy', 'purchase', 
-        'price', 'sale', 'deal', 'shipping', 'return', 'refund', 'tracking', 
-        'order', '/products/', '/cart', '/checkout', '/account', '/login', 
-        '/register', '/search', 'color', 'size', 'material', 'fabric', 
-        'quick-ship', 'ready-to-ship', 'gift-card', 'blog', 'news', 'article', 
-        'post', 'kitchen', 'dining', 'living', 'bedroom', 'bathroom', 
-        'entryway', 'hallway', 'runner', 'rug', 'loom', 'wool', 'natural', 
-        'red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 
-        'black', 'brown', 'grey', 'tan', 'minis', '4x6', '5x7', '6x9', 
-        '8x8', '8x10', '9x12', '10x10'
-    ]
-    
-    filtered_links = []
-    filtered_to_unique = []  # Map from filtered index to unique index
-    
-    for unique_idx, link in enumerate(unique_links):
+    for link in links:
         url = link.get('url', '').lower()
-        text = link.get('text', '').lower()
         
-        # IMPORTANT: Check if this is an About or Contact link FIRST
-        # These should NEVER be filtered out
-        is_about = any(keyword in url or keyword in text for keyword in about_keywords)
-        is_contact = any(keyword in url or keyword in text for keyword in contact_keywords)
+        # Skip if URL already processed
+        if url in seen_urls:
+            continue
+            
+        seen_urls.add(url)
         
-        # If it's an About or Contact link, always include it
-        if is_about or is_contact:
-            filtered_links.append(link)
-            filtered_to_unique.append(unique_idx)
+        # SIMPLE CHECK: Does URL contain 'about' keyword?
+        if 'about' in url:
+            # But exclude certain false positives
+            if not any(exclude in url for exclude in ['about-face', 'about-facebook', 'about-page']):
+                about_links.append(link)
+                custom_print(f"✅ Found About page (keyword match): {url}")
+                continue
+        
+        # SIMPLE CHECK: Does URL contain 'contact' keyword?
+        if 'contact' in url:
+            contact_links.append(link)
+            custom_print(f"✅ Found Contact page (keyword match): {url}")
             continue
         
-        # Only apply exclusion logic if it's NOT an About/Contact link
-        should_exclude = any(keyword in url or keyword in text for keyword in exclude_keywords)
-        if should_exclude:
+        # Also check for other variations
+        if any(keyword in url for keyword in ['company-info', 'our-company', 'our-story', 'our-team', 
+                                             'who-we-are', 'meet-the-team', 'mission', 'vision', 
+                                             'history', 'story']):
+            about_links.append(link)
+            custom_print(f"✅ Found About page (alternative keyword): {url}")
             continue
-        
-        # Include other links that don't match exclusion criteria
-        filtered_links.append(link)
-        filtered_to_unique.append(unique_idx)
+            
+        if any(keyword in url for keyword in ['get-in-touch', 'reach-us', 'support', 'help', 
+                                             'customer-service', 'inquiries', 'feedback']):
+            contact_links.append(link)
+            custom_print(f"✅ Found Contact page (alternative keyword): {url}")
+            continue
     
-    custom_print(f"🔍 Pre-filtered from {len(unique_links)} to {len(filtered_links)} potentially relevant links")
-    
-    if not filtered_links:
-        custom_print("⚠️ No links matched pre-filtering criteria")
-        return {"about": [], "contact": []}
-    
-    # Prepare link information for Llama
-    links_text = []
-    for i, link in enumerate(filtered_links):
-        url = link.get('url', '')
-        text = link.get('text', '')
-        links_text.append(f"{i}. URL: {url} | Link Text: {text}")
-    
-    links_input = "\n".join(links_text[:50])  # Limit to 50 links
-    
-    # Improved prompt to avoid duplicates
-    prompt = f"""From the following navigation/footer links, identify which pages are "About Us" or "Contact Us" pages.
-
-About Us pages include: company information, team, story, mission, values, history, who we are, etc.
-Contact Us pages include: contact forms, customer support, get in touch, reach us, help, inquiries, etc.
-
-Look at both the URL and link text to decide.
-
-IMPORTANT:
-1. Do NOT include duplicate URLs. If the same URL appears multiple times, include it only once.
-2. Focus on distinct, unique pages.
-
-Pre-filtered Links:
-{links_input}
-
-Return a JSON object with two keys: "about" and "contact". Each key should have an array of the indices (numbers) from the list above that correspond to About or Contact pages.
-
-Example response format:
-{{
-  "about": [0, 2, 5],
-  "contact": [1, 3]
-}}
-
-Return ONLY the JSON object, no additional text or explanations."""
-
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant that analyzes website navigation links to identify About and Contact pages. Return ONLY valid JSON without duplicate URLs."},
-        {"role": "user", "content": prompt}
-    ]
-    
-    try:
-        outputs = pipeline(
-            messages,
-            max_new_tokens=512,
-            temperature=0.1,
-        )
-        
-        content = outputs[0]["generated_text"][-1]["content"]
-        
-        # Log the raw output for debugging
-        custom_print(f"🔗 Llama raw output: {content}")
-        
-        # Save to debug file
-        with open(os.path.join(DEBUG_DIR, "llama_link_identification.txt"), "a", encoding="utf-8") as f:
-            f.write(f"Input:\n{links_input}\n\nLlama output:\n{content}\n\n{'='*80}\n\n")
-        
-        # Try to extract JSON from the output
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
-            try:
-                result = json.loads(json_str)
-                about_indices = result.get("about", [])
-                contact_indices = result.get("contact", [])
-                
-                # Deduplicate indices
-                about_indices = list(set(about_indices))
-                contact_indices = list(set(contact_indices))
-                
-                custom_print(f"📊 Parsed: {len(about_indices)} About indices, {len(contact_indices)} Contact indices (after deduplication)")
-                
-                # Map filtered indices back to original links with deduplication
-                identified = {
-                    "about": [],
-                    "contact": []
-                }
-                
-                seen_urls = set()
-                
-                for idx in about_indices:
-                    if isinstance(idx, int) and idx < len(filtered_links):
-                        # Get the unique link index
-                        unique_idx = filtered_to_unique[idx]
-                        # Get the original index
-                        original_idx = filtered_indices[unique_idx]
-                        
-                        if original_idx < len(links):
-                            link = links[original_idx]
-                            url = link.get('url', '').split('?')[0]
-                            
-                            if url not in seen_urls:
-                                seen_urls.add(url)
-                                identified["about"].append(link)
-                
-                for idx in contact_indices:
-                    if isinstance(idx, int) and idx < len(filtered_links):
-                        unique_idx = filtered_to_unique[idx]
-                        original_idx = filtered_indices[unique_idx]
-                        
-                        if original_idx < len(links):
-                            link = links[original_idx]
-                            url = link.get('url', '').split('?')[0]
-                            
-                            if url not in seen_urls:
-                                seen_urls.add(url)
-                                identified["contact"].append(link)
-                
-                custom_print(f"✅ Identified {len(identified['about'])} unique About pages and {len(identified['contact'])} unique Contact pages")
-                return identified
-                
-            except json.JSONDecodeError as e:
-                custom_print(f"❌ Failed to parse JSON: {e}")
-                custom_print(f"📄 Content was: {json_str}")
-        
-        # Fallback if no JSON found
-        custom_print("⚠️ No valid JSON found in model output, falling back to keyword matching")
-        return fallback_keyword_matching(filtered_links)
-        
-    except Exception as e:
-        custom_print(f"❌ Error identifying links with Llama: {e}")
-        # Fallback to keyword matching
-        return fallback_keyword_matching(links)
+    custom_print(f"✅ Found {len(about_links)} About pages and {len(contact_links)} Contact pages")
+    return {"about": about_links, "contact": contact_links}
 
 # Custom print function to capture console output
 process_log = []
@@ -642,6 +482,34 @@ def get_all_google_domains(query, company_name=None):
     
     return all_domains
 
+def validate_domain_for_scraping(domain):
+    """Check if a domain is suitable for scraping (not a returns/order portal)"""
+    parsed = urlparse(domain)
+    domain_name = parsed.netloc.lower()
+    
+    # Patterns that indicate unsuitable domains for scraping
+    unsuitable_patterns = [
+        r'returns\.', r'order\.', r'track\.', r'shipping\.', r'delivery\.',
+        r'support\.', r'help\.', r'portal\.', r'app\.', r'secure\.',
+        r'account\.', r'login\.', r'admin\.'
+    ]
+    
+    # Check if domain matches any unsuitable patterns
+    for pattern in unsuitable_patterns:
+        if re.search(pattern, domain_name):
+            custom_print(f"⚠️ Domain appears to be a service portal: {domain_name}")
+            return False
+    
+    # Check path for returns/order patterns
+    path = parsed.path.lower()
+    if any(keyword in path for keyword in ['/returns', '/order', '/track', '/ship', '/delivery']):
+        custom_print(f"⚠️ Domain path indicates service page: {path}")
+        return False
+    
+    return True
+
+# In the find_domain_google function, modify the scoring system:
+
 def find_domain_google(query, company_name=None):
     """Find domain using Google Search API with multiple search approaches"""
     
@@ -724,8 +592,37 @@ def find_domain_google(query, company_name=None):
                         if word in snippet:
                             match_score += 3
                     
-                    # Skip low scoring domains
-                    if match_score < 10:
+                    # NEW: Penalize subdomains and specific paths
+                    # Check if this is likely NOT the main domain
+                    is_subdomain = '.' in domain_base.replace('.com', '')  # Has dots besides TLD
+                    common_subdomains = ['returns', 'shop', 'store', 'blog', 'support', 'help', 
+                                        'app', 'portal', 'account', 'login', 'admin', 'secure']
+                    
+                    # Check if domain contains common subdomain patterns
+                    if is_subdomain:
+                        for subdomain in common_subdomains:
+                            if subdomain in domain_base:
+                                match_score -= 30  # Heavy penalty for common subdomains
+                                break
+                        else:
+                            match_score -= 15  # General penalty for other subdomains
+                    
+                    # Bonus for being likely main domain
+                    if not is_subdomain and domain_name.count('.') == 1:
+                        match_score += 20  # Bonus for simple main domain (e.g., example.com)
+                    
+                    # Bonus for being homepage or root path
+                    path = parsed.path
+                    if path in ['/', '/index.html', '/index.php', '']:
+                        match_score += 10
+                    
+                    # Check if it looks like a returns/order management page
+                    if any(keyword in link.lower() or keyword in title for keyword in 
+                          ['returns', 'order', 'tracking', 'shipping', 'delivery', 'exchange']):
+                        match_score -= 25  # Penalty for returns/order pages
+                    
+                    # Skip very low scoring domains
+                    if match_score < 5:
                         continue
                     
                     domain_info = {
@@ -734,13 +631,15 @@ def find_domain_google(query, company_name=None):
                         'title': title[:100],
                         'match_score': match_score,
                         'matches_company': matches_company,
-                        'search_query': search_query
+                        'search_query': search_query,
+                        'is_subdomain': is_subdomain,
+                        'is_main_domain': (not is_subdomain and domain_name.count('.') == 1)
                     }
                     
                     # Check if we already have this domain
                     if not any(d['domain'] == domain for d in all_domains):
                         all_domains.append(domain_info)
-                        custom_print(f"    Found: {domain_name} (score: {match_score})")
+                        custom_print(f"    Found: {domain_name} (score: {match_score}, main: {domain_info['is_main_domain']})")
                 
                 break  # Successfully got results with this API key
                 
@@ -755,8 +654,8 @@ def find_domain_google(query, company_name=None):
                 custom_print(f"❌ Google API error with key {api_key}: {e}")
                 continue
     
-    # Sort domains by match score
-    all_domains.sort(key=lambda x: x['match_score'], reverse=True)
+    # Sort domains by match score, prioritizing main domains
+    all_domains.sort(key=lambda x: (x['match_score'], x['is_main_domain']), reverse=True)
     
     custom_print(f"\n📊 Search Results Analysis:")
     custom_print(f"  Total domains found: {len(all_domains)}")
@@ -764,11 +663,23 @@ def find_domain_google(query, company_name=None):
     if all_domains:
         custom_print(f"\n✅ Top matching domains:")
         for i, domain_info in enumerate(all_domains[:5], 1):
-            custom_print(f"  {i}. {domain_info['domain']} (score: {domain_info['match_score']})")
+            domain_type = "MAIN" if domain_info['is_main_domain'] else "subdomain"
+            custom_print(f"  {i}. {domain_info['domain']} (score: {domain_info['match_score']}, type: {domain_type})")
             custom_print(f"     Title: {domain_info['title']}")
         
         # Return the best matching domain
         best = all_domains[0]
+        
+        # Check if we should skip subdomains with certain patterns
+        skip_subdomains = ['returns', 'order', 'tracking', 'shipping']
+        if best['is_subdomain'] and any(pattern in best['domain_name'] for pattern in skip_subdomains):
+            custom_print(f"⚠️ Best domain is a returns/order subdomain: {best['domain_name']}")
+            # Try to find a better alternative
+            for domain_info in all_domains[1:]:
+                if domain_info['is_main_domain'] and domain_info['match_score'] >= 20:
+                    custom_print(f"✅ Using alternative main domain: {domain_info['domain']}")
+                    return domain_info['domain']
+        
         if best['match_score'] >= 20:  # Reasonable threshold
             custom_print(f"\n✅ Using best matching domain: {best['domain']} (score: {best['match_score']})")
             return best['domain']
@@ -2374,6 +2285,11 @@ def scrape_company(company, location=None, manual_domain=None):
             "process_log": process_log
         }
     
+    # Validate the domain before proceeding
+    if not validate_domain_for_scraping(domain):
+        custom_print(f"⚠️ Domain {domain} appears to be a service portal. This may not be the main website.")
+        # You could add logic here to try alternative domains
+    
     if not domain.startswith(("http://", "https://")):
         domain = f"https://{domain}"
     if not domain.endswith("/"):
@@ -2647,4 +2563,4 @@ def export_excel():
         return jsonify({'error': f'Failed to export Excel: {str(e)}'}), 500
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
