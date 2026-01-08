@@ -29,6 +29,9 @@ from selenium.webdriver.chrome.service import Service
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
+import tldextract
+
+extract = tldextract.TLDExtract()
 
 # === Configuration ===
 GOOGLE_API_KEYS = [
@@ -548,30 +551,44 @@ def find_domain_google(query, company_name=None):
                     link = item.get("link", "")
                     title = item.get("title", "").lower()
                     snippet = item.get("snippet", "").lower()
-                    parsed = urlparse(link)
-                    domain_name = parsed.netloc.lower()
                     
                     # Skip social media and common unrelated sites
                     social_media = ['facebook', 'instagram', 'linkedin', 'youtube', 'pinterest', 
                                    'twitter', 'tiktok', 'snapchat', 'reddit', 'wikipedia']
-                    if any(social in domain_name for social in social_media):
+                    if any(social in link.lower() for social in social_media):
                         continue
                     
-                    domain = f"{parsed.scheme}://{parsed.netloc}/"
+                    # Parse domain using tldextract
+                    parsed_domain = extract(link)
+                    domain_name = parsed_domain.fqdn
                     
-                    # Extract domain base more accurately
-                    domain_base = re.sub(r'^www\.', '', domain_name)
+                    # Get domain parts properly
+                    subdomain = parsed_domain.subdomain
+                    domain_without_tld = parsed_domain.domain
+                    suffix = parsed_domain.suffix
                     
-                    # Better TLD removal that handles multi-part TLDs
-                    tld_pattern = r'\.(com|org|net|io|co|in|us|uk|au|ca|de|fr|jp|biz|info|mobi|name|tv|cc|ws|co\.uk|com\.np|co\.in|com\.au|gov|edu|mil|np)$'
-                    domain_base = re.sub(tld_pattern, '', domain_base)
+                    # Get the scheme from the original link
+                    scheme = 'https'  # default
+                    if link.startswith('http://'):
+                        scheme = 'http'
+                    elif link.startswith('https://'):
+                        scheme = 'https'
                     
-                    # Better subdomain detection
-                    is_subdomain = '.' in domain_base
+                    domain = f"{scheme}://{domain_name}/"
                     
-                    # Check domain structure
-                    domain_parts = domain_name.replace('www.', '').split('.')
-                    is_main_domain = len(domain_parts) <= 2 or (len(domain_parts) == 3 and domain_parts[-2] in ['co', 'com'])
+                    # Determine if it's a subdomain (has a non-www subdomain part)
+                    # 'www' is not considered a meaningful subdomain for our purposes
+                    is_subdomain = bool(subdomain and subdomain not in ['www', ''])
+                    
+                    # Check if it looks like a main business domain
+                    # Main domains usually don't have extra prefixes before the actual domain name
+                    is_main_domain = not is_subdomain or subdomain in ['www', '']
+                    
+                    # Check for service subdomains
+                    service_subdomains = ['returns', 'shop', 'store', 'blog', 'support', 'help', 
+                                         'app', 'portal', 'account', 'login', 'admin', 'secure',
+                                         'order', 'tracking', 'shipping', 'delivery', 'exchange',
+                                         'api', 'cdn', 'static', 'assets', 'media', 'images']
                     
                     # IMPROVED MATCHING LOGIC
                     matches_company = False
@@ -579,43 +596,46 @@ def find_domain_google(query, company_name=None):
                     exact_match = False
                     
                     if company_words:
+                        # Get the actual domain name without subdomain and TLD for matching
+                        domain_for_matching = domain_without_tld.lower()
+                        
                         # PRIORITY 1: Check for exact combined match (no spaces)
                         company_combined = company_clean.replace(" ", "")
                         company_combined_dash = company_clean.replace(" ", "-")
                         
-                        if domain_base == company_combined or domain_base == company_combined_dash:
+                        if domain_for_matching == company_combined or domain_for_matching == company_combined_dash:
                             match_score += 100  # HIGHEST priority for EXACT match
                             matches_company = True
                             exact_match = True
-                            custom_print(f"    ✅✅✅ EXACT MATCH: {domain_base} == {company_combined}")
+                            custom_print(f"    ✅✅✅ EXACT MATCH: {domain_for_matching} == {company_combined}")
                         
                         # PRIORITY 2: Check if domain contains exact combined company name
-                        elif company_combined in domain_base or company_combined_dash in domain_base:
+                        elif company_combined in domain_for_matching or company_combined_dash in domain_for_matching:
                             # Check if it's the full domain or just a prefix/suffix
-                            if domain_base.startswith(company_combined) or domain_base.startswith(company_combined_dash):
+                            if domain_for_matching.startswith(company_combined) or domain_for_matching.startswith(company_combined_dash):
                                 match_score += 70  # High score but penalize for extra suffix
                                 matches_company = True
-                                custom_print(f"    ✅✅ PREFIX MATCH: {domain_base} starts with {company_combined}")
+                                custom_print(f"    ✅✅ PREFIX MATCH: {domain_for_matching} starts with {company_combined}")
                             else:
                                 match_score += 50  # Lower if company name is in middle
                                 matches_company = True
-                                custom_print(f"    ✅ CONTAINS MATCH: {domain_base} contains {company_combined}")
+                                custom_print(f"    ✅ CONTAINS MATCH: {domain_for_matching} contains {company_combined}")
                         
                         # PRIORITY 3: Check individual words (ONLY if no exact match)
                         else:
                             matches = []
                             for word in company_words:
-                                if len(word) > 3 and word in domain_base:
+                                if len(word) > 3 and word in domain_for_matching:
                                     matches.append(word)
                                     match_score += 8  # Lower score for individual words
                             
                             if len(matches) >= len(company_words):
                                 match_score += 20  # All words present but not combined
                                 matches_company = True
-                                custom_print(f"    ⚠️ PARTIAL MATCH: {domain_base} contains words: {matches}")
+                                custom_print(f"    ⚠️ PARTIAL MATCH: {domain_for_matching} contains words: {matches}")
                             elif len(matches) > 0:
                                 match_score += 10  # Some words match
-                                custom_print(f"    ⚠️ WEAK MATCH: {domain_base} contains some words: {matches}")
+                                custom_print(f"    ⚠️ WEAK MATCH: {domain_for_matching} contains some words: {matches}")
                     
                     # Check title and snippet for company mention
                     for word in company_words:
@@ -630,26 +650,26 @@ def find_domain_google(query, company_name=None):
                         custom_print(f"    📄 Title contains exact company name")
                     
                     # Better subdomain penalty logic
-                    common_subdomains = ['returns', 'shop', 'store', 'blog', 'support', 'help', 
-                                        'app', 'portal', 'account', 'login', 'admin', 'secure',
-                                        'order', 'tracking', 'shipping', 'delivery', 'exchange']
-                    
                     if is_subdomain:
-                        subdomain_prefix = domain_base.split('.')[0]
-                        if subdomain_prefix in common_subdomains:
-                            match_score -= 50
-                            custom_print(f"    ⚠️ Service subdomain penalty: {subdomain_prefix}")
+                        # Check if it's a service subdomain
+                        subdomain_parts = subdomain.split('.')
+                        for subdomain_part in subdomain_parts:
+                            if subdomain_part in service_subdomains:
+                                match_score -= 50
+                                custom_print(f"    ⚠️ Service subdomain penalty: {subdomain}")
+                                break
                         else:
-                            match_score -= 20
-                            custom_print(f"    ⚠️ Subdomain penalty")
+                            # Penalize non-service subdomains less
+                            match_score -= 10
+                            custom_print(f"    ⚠️ Non-service subdomain penalty: {subdomain}")
                     
                     # Bonus for main domain
-                    if is_main_domain and not is_subdomain:
+                    if is_main_domain:
                         match_score += 25
                         custom_print(f"    ✅ Main domain bonus")
                     
                     # Bonus for homepage or root path
-                    path = parsed.path
+                    path = urlparse(link).path
                     if path in ['/', '/index.html', '/index.php', '']:
                         match_score += 10
                     
@@ -665,7 +685,9 @@ def find_domain_google(query, company_name=None):
                     domain_info = {
                         'domain': domain,
                         'domain_name': domain_name,
-                        'domain_base': domain_base,
+                        'domain_base': domain_without_tld,
+                        'subdomain': subdomain,
+                        'suffix': suffix,
                         'title': title[:100],
                         'match_score': match_score,
                         'matches_company': matches_company,
@@ -678,7 +700,7 @@ def find_domain_google(query, company_name=None):
                     # Check if we already have this domain
                     if not any(d['domain'] == domain for d in all_domains):
                         all_domains.append(domain_info)
-                        match_type = "EXACT MATCH" if exact_match else ("MAIN DOMAIN" if (is_main_domain and not is_subdomain) else "SUBDOMAIN")
+                        match_type = "EXACT MATCH" if exact_match else ("MAIN DOMAIN" if is_main_domain else "SUBDOMAIN")
                         custom_print(f"    Found: {domain_name} (score: {match_score}, type: {match_type})")
                 
                 break  # Successfully got results with this API key
@@ -715,7 +737,8 @@ def find_domain_google(query, company_name=None):
             else:
                 domain_type = "SUBDOMAIN"
             custom_print(f"  {i}. {domain_info['domain']} (score: {domain_info['match_score']}, type: {domain_type})")
-            custom_print(f"     Domain base: {domain_info['domain_base']}")
+            custom_print(f"     Domain: {domain_info['domain_base']}.{domain_info['suffix']}")
+            custom_print(f"     Subdomain: {domain_info['subdomain'] or '(none)'}")
             custom_print(f"     Title: {domain_info['title']}")
         
         # Return the best matching domain
@@ -729,8 +752,8 @@ def find_domain_google(query, company_name=None):
         # Better subdomain filtering
         skip_subdomains = ['returns', 'order', 'tracking', 'shipping', 'shop', 'store']
         if best['is_subdomain']:
-            subdomain_prefix = best['domain_base'].split('.')[0] if '.' in best['domain_base'] else ''
-            if subdomain_prefix in skip_subdomains:
+            subdomain_parts = best['subdomain'].split('.')
+            if any(part in skip_subdomains for part in subdomain_parts):
                 custom_print(f"⚠️ Best domain is a service subdomain: {best['domain_name']}")
                 # Try to find a main domain alternative or exact match
                 for domain_info in all_domains[1:]:
@@ -748,7 +771,7 @@ def find_domain_google(query, company_name=None):
     
     custom_print("❌ No suitable domains found in any search")
     
-    # Fallback: Try direct domain construction
+    # Keep your original fallback: Try direct domain construction
     if company_words:
         possible_domains = [
             f"https://{company_clean.replace(' ', '').lower()}.com",

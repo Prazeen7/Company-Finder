@@ -9,3 +9,4 @@ openpyxl
 torch
 accelerate
 lxml
+tldextract
