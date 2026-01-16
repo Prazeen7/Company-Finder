@@ -321,9 +321,11 @@ def process_page(url, depth, parsed_domain, visited):
 
         # Use Llama to intelligently identify About/Contact pages from navbar and footer links
         all_nav_links = navbar_links + footer_nav_links
-        if all_nav_links and depth == 0:  # Only use Llama on the homepage to discover pages
-            custom_print(f"🤖 Using Llama to identify About/Contact pages from {len(all_nav_links)} navigation links...")
-            identified_links = identify_about_contact_links(all_nav_links)
+        if depth == 0:  # Only on the homepage to discover pages
+            custom_print(f"🤖 Identifying About/Contact pages from {len(all_nav_links)} navigation links...")
+            # Pass base domain for URL variation fallback if no links found
+            base_domain = f"{urlparse(url).scheme}://{parsed_domain}"
+            identified_links = identify_about_contact_links(all_nav_links, base_domain=base_domain)
 
             # Add identified About pages to crawl queue
             for link_info in identified_links.get("about", []):

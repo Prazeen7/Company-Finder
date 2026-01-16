@@ -99,71 +99,64 @@ def get_pipeline():
     return pipeline
 
 def extract_all_tel_attributes(html, url):
-    """Extract ALL tel: attributes from HTML regardless of format"""
+    """Extract ALL tel: attributes from HTML - NO VALIDATION"""
     tel_numbers = set()
     
-    # Use BeautifulSoup to find all elements with tel: href
     soup = BeautifulSoup(html, "lxml")
     
-    # Find all anchor tags with href starting with tel:
-    tel_links = soup.find_all('a', href=lambda x: x and x.startswith('tel:'))
+    # 1. Find all anchor tags with href starting with tel: (case-insensitive)
+    for link in soup.find_all('a', href=True):
+        href = link['href']
+        if href.lower().startswith('tel:'):
+            phone = href[4:].strip()  # Get everything after "tel:" - no validation
+            if phone:
+                tel_numbers.add(phone)
+                custom_print(f"📞 Found tel: attribute: {href} -> {phone}")
     
-    for link in tel_links:
-        tel_href = link['href']
-        # Extract the phone number after tel:
-        phone = tel_href[4:].strip()  # Remove "tel:" prefix
-        
-        # Clean common separators but preserve the number
-        phone = phone.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('.', '')
-        
-        # Remove any parameters after ? or #
-        phone = phone.split('?')[0].split('#')[0]
-        
-        # Remove any non-numeric characters except +
-        phone = re.sub(r'[^\d+]', '', phone)
-        
-        if phone:  # Only add if we got something
-            tel_numbers.add(phone)
-            custom_print(f"📞 Found tel: attribute: {tel_href} -> {phone}")
-    
-    # Also check for tel: in onclick attributes and other places
+    # 2. Check for tel: in onclick attributes
     for tag in soup.find_all(attrs={'onclick': True}):
         onclick = tag['onclick']
         if 'tel:' in onclick.lower():
-            # Extract tel: from onclick
-            tel_match = re.search(r'tel:([^\'"\s]+)', onclick, re.IGNORECASE)
-            if tel_match:
-                phone = tel_match.group(1).strip()
-                phone = re.sub(r'[^\d+]', '', phone)
-                if phone:
-                    tel_numbers.add(phone)
-                    custom_print(f"📞 Found tel: in onclick: {phone}")
+            matches = re.findall(r'tel:([^\'"\s;)]+)', onclick, re.IGNORECASE)
+            for match in matches:
+                if match:
+                    tel_numbers.add(match)
+                    custom_print(f"📞 Found tel: in onclick: {match}")
     
-    # Check for data-tel, data-phone attributes
+    # 3. Check for data-tel, data-phone, data-number attributes
     for tag in soup.find_all(attrs={'data-tel': True}):
         phone = tag['data-tel'].strip()
-        phone = re.sub(r'[^\d+]', '', phone)
         if phone:
             tel_numbers.add(phone)
             custom_print(f"📞 Found data-tel: {phone}")
     
     for tag in soup.find_all(attrs={'data-phone': True}):
         phone = tag['data-phone'].strip()
-        phone = re.sub(r'[^\d+]', '', phone)
         if phone:
             tel_numbers.add(phone)
             custom_print(f"📞 Found data-phone: {phone}")
     
-    # Check for tel: in meta tags
+    for tag in soup.find_all(attrs={'data-number': True}):
+        phone = tag['data-number'].strip()
+        if phone:
+            tel_numbers.add(phone)
+            custom_print(f"📞 Found data-number: {phone}")
+    
+    # 4. Check for tel: in meta tags
     for meta in soup.find_all('meta', attrs={'content': True}):
         if 'tel:' in meta['content'].lower():
-            tel_match = re.search(r'tel:([^\'"\s]+)', meta['content'], re.IGNORECASE)
-            if tel_match:
-                phone = tel_match.group(1).strip()
-                phone = re.sub(r'[^\d+]', '', phone)
-                if phone:
-                    tel_numbers.add(phone)
-                    custom_print(f"📞 Found tel: in meta tag: {phone}")
+            matches = re.findall(r'tel:([^\'"\s]+)', meta['content'], re.IGNORECASE)
+            for match in matches:
+                if match:
+                    tel_numbers.add(match)
+                    custom_print(f"📞 Found tel: in meta tag: {match}")
+    
+    # 5. Regex fallback to catch any missed tel: patterns
+    tel_pattern = re.findall(r'href=["\']tel:([^"\']+)["\']', html, re.IGNORECASE)
+    for match in tel_pattern:
+        if match and match not in tel_numbers:
+            tel_numbers.add(match)
+            custom_print(f"📞 Found tel: via regex: {match}")
     
     return list(tel_numbers)
 
@@ -470,10 +463,79 @@ def extract_paragraphs_from_html(html, max_paragraphs=5, min_length=50):
         custom_print(f"❌ Error extracting paragraphs: {e}")
         return ""
 
-def identify_about_contact_links(links):
+def try_common_page_variations(base_domain):
+    """
+    Try common URL variations for About and Contact pages when none are found.
+    Returns accessible URLs that exist.
+    """
+    custom_print(f"🔄 Trying common URL variations for {base_domain}...")
+    
+    # Common About page URL patterns
+    about_variations = [
+        '/about', '/about-us', '/aboutus', '/about_us',
+        '/company', '/our-company', '/our-story', '/story',
+        '/who-we-are', '/team', '/our-team', '/mission',
+        '/vision', '/history', '/company-info', '/info'
+    ]
+    
+    # Common Contact page URL patterns
+    contact_variations = [
+        '/contact', '/contact-us', '/contactus', '/contact_us',
+        '/get-in-touch', '/reach-us', '/reach-out', '/connect',
+        '/support', '/help', '/enquiry', '/inquiry', '/location',
+        '/locations', '/find-us', '/visit-us', '/showroom', '/store'
+    ]
+    
+    # Ensure base_domain has proper format
+    if not base_domain.startswith(('http://', 'https://')):
+        base_domain = 'https://' + base_domain
+    base_domain = base_domain.rstrip('/')
+    
+    found_about = []
+    found_contact = []
+    
+    session = requests.Session()
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    
+    # Try About page variations
+    for variation in about_variations:
+        test_url = base_domain + variation
+        try:
+            response = session.head(test_url, headers=headers, timeout=5, allow_redirects=True)
+            if response.status_code == 200:
+                found_about.append({'url': test_url, 'text': variation.strip('/').replace('-', ' ').title(), 'source': 'URL variation'})
+                custom_print(f"✅ Found About page via variation: {test_url}")
+                break  # Found one, stop trying
+        except:
+            continue
+    
+    # Try Contact page variations
+    for variation in contact_variations:
+        test_url = base_domain + variation
+        try:
+            response = session.head(test_url, headers=headers, timeout=5, allow_redirects=True)
+            if response.status_code == 200:
+                found_contact.append({'url': test_url, 'text': variation.strip('/').replace('-', ' ').title(), 'source': 'URL variation'})
+                custom_print(f"✅ Found Contact page via variation: {test_url}")
+                break  # Found one, stop trying
+        except:
+            continue
+    
+    if not found_about:
+        custom_print(f"❌ No About page found via URL variations")
+    if not found_contact:
+        custom_print(f"❌ No Contact page found via URL variations")
+    
+    return {'about': found_about, 'contact': found_contact}
+
+
+def identify_about_contact_links(links, base_domain=None):
     """
     Simple keyword matching for About Us and Contact Us pages
-    Now also checks ALL scraped pages
+    Now also checks ALL scraped pages and tries URL variations as fallback
     """
     custom_print(f"🔍 Keyword matching for About/Contact pages...")
     
@@ -522,6 +584,28 @@ def identify_about_contact_links(links):
         if link.get('url') not in seen_urls:
             contact_links.append(link)
             seen_urls.add(link.get('url'))
+    
+    # FALLBACK: If no about or contact pages found, try common URL variations
+    if (not about_links or not contact_links) and base_domain:
+        custom_print(f"⚠️ Missing pages - About: {len(about_links)}, Contact: {len(contact_links)}")
+        custom_print(f"🔄 Attempting URL variation fallback for {base_domain}...")
+        
+        variation_results = try_common_page_variations(base_domain)
+        
+        # Add found variations if we're missing those pages
+        if not about_links:
+            for link in variation_results.get('about', []):
+                if link.get('url') not in seen_urls:
+                    about_links.append(link)
+                    seen_urls.add(link.get('url'))
+                    custom_print(f"✅ Added About page from URL variation: {link.get('url')}")
+        
+        if not contact_links:
+            for link in variation_results.get('contact', []):
+                if link.get('url') not in seen_urls:
+                    contact_links.append(link)
+                    seen_urls.add(link.get('url'))
+                    custom_print(f"✅ Added Contact page from URL variation: {link.get('url')}")
     
     custom_print(f"✅ Total found {len(about_links)} About pages and {len(contact_links)} Contact pages (including all scraped pages)")
     
@@ -634,49 +718,66 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
     all_hrefs = []  # List to store all <a href> tags with metadata
     footer_tracking = []
     
-    # Helper function to extract ALL tel attributes
+    # Helper function to extract ALL tel attributes - NO VALIDATION
     def extract_all_tel_from_html(html_content):
-        """Extract ALL tel: attributes from HTML"""
+        """Extract ALL tel: attributes from HTML without any validation"""
         tel_numbers = set()
         soup_temp = BeautifulSoup(html_content, "lxml")
         
-        # 1. Extract from href="tel:"
+        # 1. Extract from href="tel:" (case-insensitive)
         for link in soup_temp.find_all('a', href=True):
-            if link['href'].lower().startswith('tel:'):
-                phone = link['href'][4:].strip()
-                phone = re.sub(r'[^\d+]', '', phone)
+            href = link['href']
+            if href.lower().startswith('tel:'):
+                # Get everything after "tel:" - no validation
+                phone = href[4:].strip()
                 if phone:
                     tel_numbers.add(phone)
+                    custom_print(f"📞 TEL FOUND: {href} -> {phone}")
         
-        # 2. Extract from onclick="tel:"
+        # 2. Extract from onclick containing "tel:"
         for tag in soup_temp.find_all(attrs={'onclick': True}):
             onclick = tag['onclick']
             if 'tel:' in onclick.lower():
-                matches = re.findall(r'tel:([^\'"\s;]+)', onclick, re.IGNORECASE)
+                matches = re.findall(r'tel:([^\'"\s;)]+)', onclick, re.IGNORECASE)
                 for match in matches:
-                    phone = re.sub(r'[^\d+]', '', match)
-                    if phone:
-                        tel_numbers.add(phone)
+                    if match:
+                        tel_numbers.add(match)
+                        custom_print(f"📞 TEL FOUND in onclick: {match}")
         
-        # 3. Extract from data-tel, data-phone attributes
+        # 3. Extract from data-tel, data-phone, data-number attributes
         for tag in soup_temp.find_all(attrs={'data-tel': True}):
-            phone = re.sub(r'[^\d+]', '', tag['data-tel'])
+            phone = tag['data-tel'].strip()
             if phone:
                 tel_numbers.add(phone)
+                custom_print(f"📞 TEL FOUND in data-tel: {phone}")
         
         for tag in soup_temp.find_all(attrs={'data-phone': True}):
-            phone = re.sub(r'[^\d+]', '', tag['data-phone'])
+            phone = tag['data-phone'].strip()
             if phone:
                 tel_numbers.add(phone)
+                custom_print(f"📞 TEL FOUND in data-phone: {phone}")
+        
+        for tag in soup_temp.find_all(attrs={'data-number': True}):
+            phone = tag['data-number'].strip()
+            if phone:
+                tel_numbers.add(phone)
+                custom_print(f"📞 TEL FOUND in data-number: {phone}")
         
         # 4. Extract from meta tags
         for meta in soup_temp.find_all('meta', attrs={'content': True}):
             if 'tel:' in meta['content'].lower():
                 matches = re.findall(r'tel:([^\'"\s]+)', meta['content'], re.IGNORECASE)
                 for match in matches:
-                    phone = re.sub(r'[^\d+]', '', match)
-                    if phone:
-                        tel_numbers.add(phone)
+                    if match:
+                        tel_numbers.add(match)
+                        custom_print(f"📞 TEL FOUND in meta: {match}")
+        
+        # 5. Also scan raw HTML for any tel: patterns we might have missed
+        tel_pattern = re.findall(r'href=["\']tel:([^"\']+)["\']', html_content, re.IGNORECASE)
+        for match in tel_pattern:
+            if match and match not in tel_numbers:
+                tel_numbers.add(match)
+                custom_print(f"📞 TEL FOUND via regex: {match}")
         
         return tel_numbers
     
@@ -685,11 +786,9 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         # DON'T strip # - keep everything as is for SPA URLs
         href_clean = href.strip('"\'').rstrip('/')  # Only strip quotes, NOT #
         
-        # CAPTURE ALL tel: ATTRIBUTES - NO REGEX RESTRICTIONS
+        # CAPTURE ALL tel: ATTRIBUTES - NO VALIDATION, KEEP RAW
         if href.lower().startswith("tel:"):
-            phone = href[4:].strip()  # Remove "tel:" prefix
-            # Clean but preserve + and digits
-            phone = re.sub(r'[^\d+]', '', phone)
+            phone = href[4:].strip()  # Remove "tel:" prefix, keep everything else
             if phone:  # Only add if we got something
                 phones.add(phone)
                 footer_tracking.append(f"Phone found in {source} tel: attribute: {phone}")
@@ -814,12 +913,12 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
                     footer_tracking.append(f"Email found in shadow DOM: {clean_email}")
                     custom_print(f"✅ Added shadow DOM email: {clean_email}")
         
-        # Integrate shadow DOM phones
+        # Integrate shadow DOM phones - NO VALIDATION
         if debug_data.get("raw_phones"):
             for phone in debug_data["raw_phones"]:
-                clean_phone = re.sub(r'^(Tel|Phone|Call):\s*', '', phone).strip()
-                clean_phone = clean_phone.replace("tel:", "").strip()
-                clean_phone = re.sub(r'[^\d+]', '', clean_phone)
+                # Just clean up prefixes, keep the number as-is
+                clean_phone = re.sub(r'^(Tel|Phone|Call):\s*', '', str(phone), flags=re.IGNORECASE).strip()
+                clean_phone = clean_phone.replace("tel:", "").replace("Tel:", "").strip()
                 if clean_phone and clean_phone not in phones:
                     phones.add(clean_phone)
                     footer_tracking.append(f"Phone found in shadow DOM: {clean_phone}")
@@ -886,6 +985,20 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
                     if phone not in phones:
                         phones.add(phone)
                         custom_print(f"✅ Found tel in shadow DOM: {phone}")
+                
+                # Also extract phone numbers from plain text in shadow DOM
+                phone_patterns = [
+                    r'(?:\+?977[\s\-]?)?[9][0-9]{9}',  # Nepal mobile
+                    r'\+?[0-9]{1,4}[\s\-]?[0-9]{6,14}',  # International format
+                    r'(?:\(\+?[0-9]{1,4}\)[\s\-]?)?[0-9]{6,14}',  # With country code in parens
+                ]
+                for pattern in phone_patterns:
+                    for match in re.findall(pattern, shadow_text):
+                        phone = match.strip()
+                        if phone and len(phone) >= 10 and phone not in phones:
+                            phones.add(phone)
+                            footer_tracking.append(f"Phone found in shadow DOM text: {phone}")
+                            custom_print(f"✅ Found phone in shadow DOM text: {phone}")
 
     # Enhanced footer detection
     footer_selector = (
@@ -914,21 +1027,24 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         except json.JSONDecodeError:
             custom_print(f"❌ Failed to parse footerURL attribute: {footer.get('footerURL')}")
     
-    # Collect <a href> tags from footer - KEEP hash fragments
-    footer_nav_links = []  # Store footer navigation links for Llama processing
+    # Collect footer navigation links for separate tracking (hrefs already in all_hrefs from "Page" extraction)
+    footer_nav_links = []
     if footer:
         for href_elem in footer.select('a[href]'):
-            if href_elem["href"] and not any(href_elem["href"].lower().endswith(ext) for ext in excluded_extensions):
-                # Pass raw href to verify_href
-                href_info = verify_href(href_elem["href"], "Footer")
-                all_hrefs.append(href_info)
-                # For navigation tracking
-                absolute_url = href_info["url"]
+            href = href_elem["href"]
+            if href and not any(href.lower().endswith(ext) for ext in excluded_extensions):
+                # Make URL absolute for tracking
+                if href.startswith(('http://', 'https://')):
+                    absolute_url = href
+                elif not href.startswith(('tel:', 'mailto:', '#', 'javascript:')):
+                    absolute_url = urljoin(url, href)
+                else:
+                    absolute_url = href
                 link_text = href_elem.get_text().strip()
                 if absolute_url.startswith(('http://', 'https://')):
                     footer_nav_links.append({"url": absolute_url, "text": link_text})
 
-    # Collect navbar/header links - KEEP hash fragments
+    # Collect navbar/header links for separate tracking (hrefs already in all_hrefs from "Page" extraction)
     navbar_links = []
     navbar_selector = (
         'nav, header, [role="navigation"], [class*="nav" i], [class*="menu" i], '
@@ -937,10 +1053,15 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
     navbar = soup.select(navbar_selector)
     for nav_elem in navbar:
         for href_elem in nav_elem.select('a[href]'):
-            if href_elem["href"] and not any(href_elem["href"].lower().endswith(ext) for ext in excluded_extensions):
-                href_info = verify_href(href_elem["href"], "Navbar")
-                all_hrefs.append(href_info)
-                absolute_url = href_info["url"]
+            href = href_elem["href"]
+            if href and not any(href.lower().endswith(ext) for ext in excluded_extensions):
+                # Make URL absolute for tracking
+                if href.startswith(('http://', 'https://')):
+                    absolute_url = href
+                elif not href.startswith(('tel:', 'mailto:', '#', 'javascript:')):
+                    absolute_url = urljoin(url, href)
+                else:
+                    absolute_url = href
                 link_text = href_elem.get_text().strip()
                 if absolute_url.startswith(('http://', 'https://')):
                     navbar_links.append({"url": absolute_url, "text": link_text})
@@ -1154,9 +1275,42 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         json.dump(all_hrefs, f, indent=2, ensure_ascii=False)
     custom_print(f"📝 All hrefs saved to {hrefs_log_path}")
 
+    # Normalize and deduplicate phone numbers
+    def normalize_phone(phone):
+        """Normalize phone number by removing all non-digits except leading +"""
+        clean = re.sub(r'[^\d+]', '', str(phone))
+        # Remove leading + for comparison, but track if it had one
+        if clean.startswith('+'):
+            return clean[1:]
+        return clean
+    
+    # Group phones by their normalized form
+    phone_groups = {}
+    for phone in phones:
+        normalized = normalize_phone(phone)
+        if normalized not in phone_groups:
+            phone_groups[normalized] = []
+        phone_groups[normalized].append(phone)
+    
+    # For each group, pick the best formatted version (prefer with country code)
+    deduplicated_phones = set()
+    for normalized, variants in phone_groups.items():
+        # Prefer variant with + prefix, then longest
+        best = None
+        for v in variants:
+            if best is None:
+                best = v
+            elif v.startswith('+') and not best.startswith('+'):
+                best = v
+            elif v.startswith('+') == best.startswith('+') and len(v) > len(best):
+                best = v
+        deduplicated_phones.add(best)
+    
+    custom_print(f"📞 Deduplicated phones: {len(phones)} -> {len(deduplicated_phones)}")
+    
     # Validate phone numbers with country codes
     validated_phones = []
-    for phone in phones:
+    for phone in deduplicated_phones:
         validation_result = validate_phone_with_country_code(phone)
         if validation_result["is_valid"]:
             validated_phones.append(validation_result)

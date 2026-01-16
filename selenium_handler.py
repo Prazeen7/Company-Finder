@@ -273,6 +273,32 @@ def get_rendered_html(url, driver, retries=2):
                 except Exception as e:
                     debug_data["alerts"].append(f"Timeout waiting for page elements: {str(e)}")
                 
+                # Wait for page to be completely loaded (document ready + network idle)
+                custom_print(f"⏳ Waiting for page to fully load...")
+                try:
+                    # Wait for document.readyState to be 'complete'
+                    WebDriverWait(driver, 15).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete"
+                    )
+                    custom_print(f"✅ Document ready state: complete")
+                    
+                    # Wait for any pending network requests to settle (check for stable anchor count)
+                    initial_anchor_count = driver.execute_script("return document.querySelectorAll('a[href]').length")
+                    time.sleep(1)
+                    
+                    # Check if anchor count stabilizes (no new dynamic content being added)
+                    for _ in range(5):  # Max 5 checks
+                        time.sleep(0.5)
+                        current_anchor_count = driver.execute_script("return document.querySelectorAll('a[href]').length")
+                        if current_anchor_count == initial_anchor_count:
+                            break
+                        initial_anchor_count = current_anchor_count
+                        custom_print(f"📊 Anchor count changed: {current_anchor_count}, waiting for stability...")
+                    
+                    custom_print(f"✅ Page content stabilized with {initial_anchor_count} anchor tags")
+                except Exception as e:
+                    custom_print(f"⚠️ Page load wait issue: {e}, continuing anyway...")
+                
                 # Handle alerts (unchanged)
                 try:
                     alert = Alert(driver)
@@ -461,6 +487,21 @@ def get_rendered_html(url, driver, retries=2):
                                 debug_data["raw_phones"].append(phone)
                                 consolidated_links.add((phone, "Shadow DOM Phone"))
                                 custom_print(f"✅ Found tel: in shadow DOM: {phone}")
+                            
+                            # Also extract phone numbers from plain text (not just tel: links)
+                            # Pattern for phone numbers in text
+                            phone_patterns = [
+                                r'(?:\+?977[\s\-]?)?[9][0-9]{9}',  # Nepal mobile
+                                r'\+?[0-9]{1,4}[\s\-]?[0-9]{6,14}',  # International
+                                r'(?:\(\+?[0-9]{1,4}\)[\s\-]?)?[0-9]{6,14}',  # With country code in parens
+                            ]
+                            for pattern in phone_patterns:
+                                for match in re.findall(pattern, shadow_text):
+                                    phone = re.sub(r'[\s\-]', '', match)
+                                    if phone and len(phone) >= 10 and phone not in debug_data["raw_phones"]:
+                                        debug_data["raw_phones"].append(phone)
+                                        consolidated_links.add((phone, "Shadow DOM Phone Text"))
+                                        custom_print(f"✅ Found phone in shadow DOM text: {phone}")
                             
                             # Original extraction logic (keep for email, addresses, socials)
                             for match in EMAIL_REGEX.findall(shadow_text + " " + elem_html):
