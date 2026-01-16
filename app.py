@@ -8,8 +8,8 @@ from export import save_results, generate_excel
 from google_api import find_domain_google, validate_domain_for_scraping, fallback_google_search, validate_company_match
 from config import SOCIAL_REGEXES, DEBUG_DIR
 
-# Import from data_processor to ensure Llama model is initialized
-from data_processor import load_country_codes, extract_location_info, generate_business_nature
+# Import from data_processor - model loading is now lazy/async
+from data_processor import load_country_codes, extract_location_info, generate_business_nature, get_model_status, load_model_async
 
 # Ensure debug directory exists
 if not os.path.exists(DEBUG_DIR):
@@ -21,6 +21,10 @@ app.secret_key = str(uuid.uuid4())
 
 # Load country codes at startup
 load_country_codes()
+
+# Start model loading in background (UI loads instantly)
+print("🚀 Starting model loading in background...")
+load_model_async()
 
 # Store results globally for export
 current_results = []
@@ -138,6 +142,12 @@ def scrape_company(company, location=None, manual_domain=None):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/model-status')
+def model_status():
+    """Get the current model loading status"""
+    status = get_model_status()
+    return jsonify(status)
 
 @app.route('/search', methods=['POST'])
 def search():

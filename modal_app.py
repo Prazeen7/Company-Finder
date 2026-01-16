@@ -8,8 +8,25 @@ with all necessary dependencies including Chrome/Selenium for web scraping.
 import modal
 import os
 
+# Model configuration
+MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+MODEL_CACHE_DIR = "/root/.cache/huggingface"
+
 # Create a Modal app for the application
 app = modal.App(name="company-finder")
+
+
+def download_model():
+    """Download and cache the model during image build."""
+    from huggingface_hub import snapshot_download
+
+    print(f"Downloading model: {MODEL_NAME}")
+    snapshot_download(
+        MODEL_NAME,
+        cache_dir=MODEL_CACHE_DIR,
+    )
+    print(f"Model downloaded successfully to {MODEL_CACHE_DIR}")
+
 
 # Define the container image with all dependencies
 image = (
@@ -58,11 +75,24 @@ image = (
         "rm -rf /tmp/chromedriver*",
     )
     .pip_install_from_requirements("requirements-modal.txt")
-    .add_local_dir(
-        ".",
-        "/root/app",
-        ignore=["debug_html", "myenv", "__pycache__", "*.pyc"]
+    # Download and cache the model during image build
+    .env({"HF_HUB_CACHE": MODEL_CACHE_DIR})
+    .run_function(
+        download_model,
+        secrets=[modal.Secret.from_name("huggingface-token")],
     )
+    # Application files - Flask app and all supporting modules
+    .add_local_file("app.py", "/root/app/app.py")
+    .add_local_file("config.py", "/root/app/config.py")
+    .add_local_file("countryCode.txt", "/root/app/countryCode.txt")
+    .add_local_file("data_processor.py", "/root/app/data_processor.py")
+    .add_local_file("export.py", "/root/app/export.py")
+    .add_local_file("google_api.py", "/root/app/google_api.py")
+    .add_local_file("scraper.py", "/root/app/scraper.py")
+    .add_local_file("selenium_handler.py", "/root/app/selenium_handler.py")
+    .add_local_file("utils.py", "/root/app/utils.py")
+    # Templates directory for Flask
+    .add_local_dir("templates", "/root/app/templates")
 )
 
 # Create persistent volume for model cache and debug data
@@ -79,12 +109,15 @@ volume = modal.Volume.from_name("company-finder-data", create_if_missing=True)
 
 @app.function(
     image=image,
-    gpu=None,
+    gpu="T4",  # GPU required for Llama model inference
     cpu=4.0,
-    memory=16384,  # 16GB RAM
+    memory=32768,  # 32GB RAM for Llama 8B model
     timeout=3600,  # 1 hour timeout
     volumes={"/data": volume},
-    secrets=[modal.Secret.from_name("google-api-keys")],
+    secrets=[
+        modal.Secret.from_name("google-api-keys"),
+        modal.Secret.from_name("huggingface-token"),
+    ],
 )
 @modal.wsgi_app()
 def flask_app():
@@ -96,6 +129,7 @@ def flask_app():
 
     # Set environment variables for the app
     os.environ.setdefault("DEBUG_DIR", "/data/debug_html")
+    os.environ.setdefault("HF_HUB_CACHE", "/root/.cache/huggingface")
 
     # Create debug directory if it doesn't exist
     os.makedirs("/data/debug_html", exist_ok=True)
@@ -114,6 +148,7 @@ def flask_app():
     memory=81920,
     timeout=86400,  # 24 hours
     volumes={"/data": volume},
+    secrets=[modal.Secret.from_name("huggingface-token")],
 )
 def warm_up_model():
     """
@@ -122,18 +157,20 @@ def warm_up_model():
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    MODEL_NAME = "Qwen/Qwen2-0.5B-Instruct"
-    print(f"Loading model: {MODEL_NAME}")
+    cache_dir = "/root/.cache/huggingface"
+    model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    print(f"Loading model: {model_name} from cache: {cache_dir}")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        model_name,
         torch_dtype="auto",
-        device_map="auto"
+        device_map="auto",
+        cache_dir=cache_dir
     )
 
     print(f"Model loaded successfully!")
-    return {"status": "Model warmed up", "model": MODEL_NAME}
+    return {"status": "Model warmed up", "model": model_name}
 
 
 @app.local_entrypoint()
@@ -164,29 +201,39 @@ def main():
     memory=16384,
     timeout=3600,
     volumes={"/data": volume},
-    secrets=[modal.Secret.from_name("google-api-keys")],
+    secrets=[
+        modal.Secret.from_name("google-api-keys"),
+        modal.Secret.from_name("huggingface-token"),
+    ],
 )
-def batch_search(query: str, num_results: int = 10):
+def batch_search(company: str, location: str = ""):
     """
-    Run a batch company search from CLI.
+    Run a company search from CLI.
 
     Usage:
-        modal run modal_app.py::batch_search --query "tech startups in SF" --num-results 20
+        modal run modal_app.py::batch_search --company "Apple Inc" --location "California"
     """
     import sys
     sys.path.insert(0, "/root/app")
 
-    from app import enhanced_google_search, extract_data
+    # Set environment variables for the app
+    os.environ.setdefault("DEBUG_DIR", "/data/debug_html")
+    os.environ.setdefault("HF_HUB_CACHE", "/root/.cache/huggingface")
+    os.makedirs("/data/debug_html", exist_ok=True)
 
-    print(f"Searching for: {query}")
-    results = enhanced_google_search(query, num_results)
+    from app import scrape_company
 
-    print(f"\nFound {len(results)} results")
-    for idx, result in enumerate(results, 1):
-        print(f"\n{idx}. {result.get('title', 'N/A')}")
-        print(f"   URL: {result.get('link', 'N/A')}")
+    print(f"Searching for: {company}" + (f" in {location}" if location else ""))
+    result = scrape_company(company, location if location else None)
 
-    return results
+    print(f"\nResults for {company}:")
+    print(f"  Domain: {result.get('domain', 'N/A')}")
+    print(f"  Emails: {result.get('emails', [])}")
+    print(f"  Phones: {result.get('phone_numbers', [])}")
+    print(f"  Country: {result.get('country', 'N/A')}")
+    print(f"  Business Nature: {result.get('business_nature', 'N/A')}")
+
+    return result
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from urllib.parse import urljoin, urlparse
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import random
+import time 
 
 from config import (
     EMAIL_REGEX, PHONE_REGEX, ADDRESS_REGEX, SOCIAL_REGEXES, 
@@ -16,23 +17,86 @@ from utils import custom_print, validate_social_link, save_contact_page_log, ext
 
 # Load country codes for phone validation
 COUNTRY_CODES = {}
+ALL_SCRAPED_LINKS = {}
 
-# Add these imports at the top of data_processor.py if not already present
-try:
-    import transformers
-    import torch
-    
-    # Initialize Llama Model Pipeline
-    from config import MODEL_NAME
-    pipeline = transformers.pipeline(
-        "text-generation",
-        model=MODEL_NAME,
-        model_kwargs={"torch_dtype": torch.bfloat16},
-        device_map="auto",
-    )
-except Exception as e:
-    print(f"❌ Failed to load Llama model: {e}")
-    pipeline = None
+# Lazy model loading with status tracking
+import threading
+
+pipeline = None
+model_status = {
+    "status": "not_started",  # not_started, loading, loaded, failed
+    "message": "Model not yet initialized",
+    "progress": 0
+}
+_model_lock = threading.Lock()
+_model_loading = False
+
+def get_model_status():
+    """Get the current model loading status"""
+    return model_status.copy()
+
+def load_model_async():
+    """Load the model in a background thread"""
+    global pipeline, model_status, _model_loading
+
+    with _model_lock:
+        if _model_loading or model_status["status"] == "loaded":
+            return
+        _model_loading = True
+
+    def _load():
+        global pipeline, model_status, _model_loading
+        try:
+            model_status["status"] = "loading"
+            model_status["message"] = "Importing libraries..."
+            model_status["progress"] = 10
+
+            import transformers
+            import torch
+
+            model_status["message"] = "Loading model weights..."
+            model_status["progress"] = 30
+
+            from config import MODEL_NAME
+            print(f"🔄 Loading model: {MODEL_NAME}")
+
+            # Use cached model from image build
+            import os
+            cache_dir = os.environ.get("HF_HUB_CACHE", "/root/.cache/huggingface")
+
+            pipeline = transformers.pipeline(
+                "text-generation",
+                model=MODEL_NAME,
+                model_kwargs={
+                    "torch_dtype": torch.bfloat16,
+                    "cache_dir": cache_dir,
+                },
+                device_map="auto",
+            )
+
+            model_status["status"] = "loaded"
+            model_status["message"] = f"Model loaded: {MODEL_NAME}"
+            model_status["progress"] = 100
+            print(f"✅ Model loaded successfully: {MODEL_NAME}")
+
+        except Exception as e:
+            model_status["status"] = "failed"
+            model_status["message"] = f"Failed to load model: {str(e)}"
+            model_status["progress"] = 0
+            print(f"❌ Failed to load Llama model: {e}")
+            pipeline = None
+        finally:
+            _model_loading = False
+
+    thread = threading.Thread(target=_load, daemon=True)
+    thread.start()
+
+def get_pipeline():
+    """Get the model pipeline, starting load if not started"""
+    global pipeline
+    if model_status["status"] == "not_started":
+        load_model_async()
+    return pipeline
 
 def extract_all_tel_attributes(html, url):
     """Extract ALL tel: attributes from HTML regardless of format"""
@@ -104,7 +168,12 @@ def extract_all_tel_attributes(html, url):
     return list(tel_numbers)
 
 def extract_location_info(text):
-    if not pipeline:
+    current_pipeline = get_pipeline()
+    if not current_pipeline:
+        status = get_model_status()
+        if status["status"] == "loading":
+            custom_print("⏳ Model is still loading, returning N/A for location info")
+            return {"country": "N/A (Model loading...)"}
         custom_print("❌ Llama model not loaded, returning N/A for location info")
         return {"country": "N/A"}
 
@@ -121,13 +190,13 @@ Return ONLY the JSON object, no additional text."""
     ]
 
     try:
-        outputs = pipeline(
+        outputs = current_pipeline(
             messages,
             max_new_tokens=100,
             temperature=0.1,
         )
         content = outputs[0]["generated_text"][-1]["content"]
-        
+
         # Extract JSON
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
@@ -135,15 +204,20 @@ Return ONLY the JSON object, no additional text."""
             country = result.get("country", "N/A")
             custom_print(f"🌍 Extracted country: {country}")
             return {"country": country}
-        
+
         return {"country": "N/A"}
-        
+
     except Exception as e:
         custom_print(f"❌ Error extracting country info: {e}")
         return {"country": "N/A"}
 
 def generate_business_nature(meta_desc, about_content):
-    if not pipeline:
+    current_pipeline = get_pipeline()
+    if not current_pipeline:
+        status = get_model_status()
+        if status["status"] == "loading":
+            custom_print("⏳ Model is still loading, returning N/A for business nature")
+            return "N/A (Model loading...)"
         custom_print("❌ Llama model not loaded, returning N/A for business nature")
         return "N/A (Llama model not loaded)"
 
@@ -172,13 +246,13 @@ Return only the description, no additional text or explanations."""
     ]
 
     try:
-        outputs = pipeline(
+        outputs = current_pipeline(
             messages,
             max_new_tokens=100,
             temperature=0.1,
         )
         content = outputs[0]["generated_text"][-1]["content"].strip()
-        
+
         # Clean up the response
         if content.startswith('"') and content.endswith('"'):
             content = content[1:-1]
@@ -399,54 +473,153 @@ def extract_paragraphs_from_html(html, max_paragraphs=5, min_length=50):
 def identify_about_contact_links(links):
     """
     Simple keyword matching for About Us and Contact Us pages
-    Just check if URL contains 'about' or 'contact' keywords
+    Now also checks ALL scraped pages
     """
-    custom_print(f"🔍 Simple keyword matching for About/Contact pages from {len(links)} links")
+    custom_print(f"🔍 Keyword matching for About/Contact pages...")
     
+    # First check the provided links
     about_links = []
     contact_links = []
-    
-    # Keep track of unique URLs
     seen_urls = set()
     
     for link in links:
-        url = link.get('url', '').lower()
-        
-        # Skip if URL already processed
-        if url in seen_urls:
+        if not isinstance(link, dict) or 'url' not in link:
+            continue
+            
+        url = link.get('url', '')
+        if not url or url in seen_urls:
             continue
             
         seen_urls.add(url)
         
-        # SIMPLE CHECK: Does URL contain 'about' keyword?
-        if 'about' in url:
-            # But exclude certain false positives
-            if not any(exclude in url for exclude in ['about-face', 'about-facebook', 'about-page']):
-                about_links.append(link)
-                custom_print(f"✅ Found About page (keyword match): {url}")
-                continue
+        # Convert to lowercase for case-insensitive matching
+        url_lower = url.lower()
+        text = link.get('text', '').lower()
         
-        # SIMPLE CHECK: Does URL contain 'contact' keyword?
-        if 'contact' in url:
-            contact_links.append(link)
-            custom_print(f"✅ Found Contact page (keyword match): {url}")
-            continue
-        
-        # Also check for other variations
-        if any(keyword in url for keyword in ['company-info', 'our-company', 'our-story', 'our-team', 
-                                             'who-we-are', 'meet-the-team', 'mission', 'vision', 
-                                             'history', 'story']):
+        # SIMPLE CHECK: If URL contains 'about' -> About page
+        if 'about' in url_lower:
             about_links.append(link)
-            custom_print(f"✅ Found About page (alternative keyword): {url}")
+            custom_print(f"✅ About page (contains 'about'): {url}")
             continue
             
-        if any(keyword in url for keyword in ['get-in-touch', 'reach-us', 'support', 'help', 
-                                             'customer-service', 'inquiries', 'feedback']):
+        # SIMPLE CHECK: If URL contains 'contact' -> Contact page  
+        if 'contact' in url_lower:
             contact_links.append(link)
-            custom_print(f"✅ Found Contact page (alternative keyword): {url}")
+            custom_print(f"✅ Contact page (contains 'contact'): {url}")
             continue
     
-    custom_print(f"✅ Found {len(about_links)} About pages and {len(contact_links)} Contact pages")
+    # Also check ALL scraped pages for more links
+    custom_print("🔍 Also checking ALL scraped pages for About/Contact links...")
+    all_pages_results = identify_about_contact_links_from_all_pages()
+    
+    # Combine results
+    for link in all_pages_results.get('about', []):
+        if link.get('url') not in seen_urls:
+            about_links.append(link)
+            seen_urls.add(link.get('url'))
+    
+    for link in all_pages_results.get('contact', []):
+        if link.get('url') not in seen_urls:
+            contact_links.append(link)
+            seen_urls.add(link.get('url'))
+    
+    custom_print(f"✅ Total found {len(about_links)} About pages and {len(contact_links)} Contact pages (including all scraped pages)")
+    
+    # Show what we found
+    if about_links:
+        custom_print("About pages found:")
+        for link in about_links[:5]:  # Show first 5
+            custom_print(f"  - {link.get('url')}")
+    
+    if contact_links:
+        custom_print("Contact pages found:")
+        for link in contact_links[:5]:  # Show first 5
+            custom_print(f"  - {link.get('url')}")
+    
+    return {"about": about_links, "contact": contact_links}
+
+def get_all_scraped_links():
+    """
+    Get ALL links from ALL scraped pages
+    Returns a deduplicated list of all links found
+    """
+    global ALL_SCRAPED_LINKS
+    
+    all_links = []
+    seen_urls = set()
+    
+    custom_print(f"📊 Getting ALL links from {len(ALL_SCRAPED_LINKS)} scraped pages")
+    
+    for page_url, page_data in ALL_SCRAPED_LINKS.items():
+        # Get all link types from this page
+        link_sources = [
+            page_data.get('all_hrefs', []),
+            page_data.get('navbar_links', []),
+            page_data.get('footer_nav_links', [])
+        ]
+        
+        for link_source in link_sources:
+            for link in link_source:
+                if isinstance(link, dict) and 'url' in link:
+                    url = link.get('url', '')
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        all_links.append(link)
+    
+    custom_print(f"📊 Collected {len(all_links)} unique links from {len(ALL_SCRAPED_LINKS)} scraped pages")
+    return all_links
+
+def identify_about_contact_links_from_all_pages():
+    """
+    Identify About/Contact pages from ALL links found in ALL scraped pages
+    """
+    custom_print("🔍 Searching for About/Contact pages from ALL scraped pages...")
+    
+    all_links = get_all_scraped_links()
+    
+    about_links = []
+    contact_links = []
+    seen_urls = set()
+    
+    for link in all_links:
+        if not isinstance(link, dict) or 'url' not in link:
+            continue
+            
+        url = link.get('url', '')
+        if not url or url in seen_urls:
+            continue
+            
+        seen_urls.add(url)
+        
+        # Convert to lowercase for case-insensitive matching
+        url_lower = url.lower()
+        text = link.get('text', '').lower()
+        
+        # SIMPLE CHECK: If URL contains 'about' -> About page
+        if 'about' in url_lower:
+            about_links.append(link)
+            custom_print(f"✅ About page found in scraped links: {url}")
+            continue
+            
+        # SIMPLE CHECK: If URL contains 'contact' -> Contact page  
+        if 'contact' in url_lower:
+            contact_links.append(link)
+            custom_print(f"✅ Contact page found in scraped links: {url}")
+            continue
+    
+    custom_print(f"✅ Found {len(about_links)} About pages and {len(contact_links)} Contact pages from ALL scraped pages")
+    
+    # Show what we found
+    if about_links:
+        custom_print("About pages found in all scraped pages:")
+        for link in about_links[:5]:  # Show first 5
+            custom_print(f"  - {link.get('url')}")
+    
+    if contact_links:
+        custom_print("Contact pages found in all scraped pages:")
+        for link in contact_links[:5]:  # Show first 5
+            custom_print(f"  - {link.get('url')}")
+    
     return {"about": about_links, "contact": contact_links}
 
 def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown", debug_data=None):
@@ -507,9 +680,10 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         
         return tel_numbers
     
-    # Helper function to verify and categorize hrefs
+    # Helper function to verify and categorize hrefs - DO NOT strip #
     def verify_href(href, source):
-        href_clean = href.strip('"\' #').rstrip('/')  # Preserve query parameters, only strip fragment and quotes
+        # DON'T strip # - keep everything as is for SPA URLs
+        href_clean = href.strip('"\'').rstrip('/')  # Only strip quotes, NOT #
         
         # CAPTURE ALL tel: ATTRIBUTES - NO REGEX RESTRICTIONS
         if href.lower().startswith("tel:"):
@@ -544,17 +718,79 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
                 else:
                     custom_print(f"🚫 Rejected {platform} media/invalid URL: {href_clean}")
         
-        # Standard link (preserve query parameters)
-        return {"url": urljoin(url, href).split("#")[0], "source": source, "type": "Link", "page_url": url}
+        # Standard link - make absolute if relative, but KEEP the hash fragment
+        # Check if it's already a full URL
+        if href.startswith(('http://', 'https://', 'tel:', 'mailto:', '#', 'javascript:')):
+            # Already a full URL or special protocol
+            return {"url": href, "source": source, "type": "Link", "page_url": url}
+        else:
+            # Make it absolute relative to current page
+            absolute_url = urljoin(url, href)
+            return {"url": absolute_url, "source": source, "type": "Link", "page_url": url}
 
-    # Collect all <a href> tags from the entire page
+    # Collect ALL <a href> tags from the entire page - DO NOT split by #
     excluded_extensions = ['.pdf', '.jpg', '.png', '.jpeg', '.gif']
-    page_links = [a["href"] for a in soup.select('a[href]') if a["href"] and not any(a["href"].lower().endswith(ext) for ext in excluded_extensions)]
-    for href in page_links:
-        href = urljoin(url, href).split("#")[0]  # Only remove fragment, preserve query parameters
-        if href:  # Filter out empty hrefs
-            all_hrefs.append(verify_href(href, "Page"))
-
+    
+    # METHOD 1: Direct href extraction from <a> tags
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if href and not any(href.lower().endswith(ext) for ext in excluded_extensions):
+            href_info = verify_href(href, "Page")
+            all_hrefs.append(href_info)
+    
+    # METHOD 2: Extract links from onclick handlers and other JavaScript
+    for tag in soup.find_all(attrs={'onclick': True}):
+        onclick = tag['onclick']
+        # Look for URLs in onclick handlers
+        url_patterns = [
+            r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]",
+            r"window\.open\s*\(\s*['\"]([^'\"]+)['\"]",
+            r"location\.href\s*=\s*['\"]([^'\"]+)['\"]",
+            r"\.navigate\s*\(\s*['\"]([^'\"]+)['\"]",
+            r"\.push\s*\(\s*['\"]([^'\"]+)['\"]",
+            r"\.go\s*\(\s*['\"]([^'\"]+)['\"]"
+        ]
+        
+        for pattern in url_patterns:
+            matches = re.findall(pattern, onclick, re.IGNORECASE)
+            for match in matches:
+                if match and not any(match.lower().endswith(ext) for ext in excluded_extensions):
+                    href_info = verify_href(match, "JavaScript onclick")
+                    all_hrefs.append(href_info)
+    
+    # METHOD 3: Extract from data attributes (common in SPAs)
+    for tag in soup.find_all(attrs=True):
+        for attr_name, attr_value in tag.attrs.items():
+            if isinstance(attr_value, str) and any(keyword in attr_name.lower() for keyword in ['href', 'url', 'link', 'route', 'path']):
+                if attr_value and not any(attr_value.lower().endswith(ext) for ext in excluded_extensions):
+                    href_info = verify_href(attr_value, f"Data attribute {attr_name}")
+                    all_hrefs.append(href_info)
+    
+    # METHOD 4: Extract from script tags (look for router configurations)
+    for script in soup.find_all('script'):
+        if script.string:
+            script_content = script.string
+            # Look for router configurations common in SPAs
+            router_patterns = [
+                r'path:\s*["\']([^"\']+)["\']',
+                r'url:\s*["\']([^"\']+)["\']',
+                r'route:\s*["\']([^"\']+)["\']',
+                r'\.when\s*\(\s*["\']([^"\']+)["\']',
+                r'path:\s*["\']([^"\']+)["\']',
+                r'\.route\s*\(\s*["\']([^"\']+)["\']'
+            ]
+            
+            for pattern in router_patterns:
+                matches = re.findall(pattern, script_content, re.IGNORECASE)
+                for match in matches:
+                    if match and '/contact' in match.lower():
+                        # This looks like a contact route
+                        contact_route = match
+                        if not contact_route.startswith(('http://', 'https://')):
+                            contact_route = f"#{contact_route}" if contact_route.startswith('/') else f"#/{contact_route}"
+                        href_info = verify_href(contact_route, "JavaScript router")
+                        all_hrefs.append(href_info)
+    
     # STEP 1: Extract ALL tel attributes from main HTML (MOST IMPORTANT)
     custom_print(f"📞 Step 1: Extracting ALL tel attributes from HTML...")
     all_tel_numbers = extract_all_tel_from_html(html)
@@ -564,7 +800,7 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
             footer_tracking.append(f"Phone found in HTML tel attribute: {phone}")
             custom_print(f"✅ Captured tel attribute: {phone}")
 
-    # Integrate shadow DOM data
+    # Integrate shadow DOM data - THIS IS CRITICAL FOR SPA LINKS
     if debug_data:
         custom_print("🔄 Integrating shadow DOM data...")
         
@@ -603,6 +839,31 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
             for shadow_item in debug_data["shadow_content"]:
                 shadow_soup = BeautifulSoup(shadow_item["html"], "lxml")
                 
+                # Process shadow DOM HTML for ALL links (not just social)
+                for a in shadow_soup.find_all("a", href=True):
+                    href = a["href"]
+                    if href and not any(href.lower().endswith(ext) for ext in excluded_extensions):
+                        href_info = verify_href(href, "Shadow DOM")
+                        all_hrefs.append(href_info)
+                        custom_print(f"✅ Found link in shadow DOM: {href}")
+                
+                # Also extract from shadow DOM text for potential contact info
+                shadow_text = shadow_soup.get_text(" ", strip=True)
+                if 'contact' in shadow_text.lower() and 'href' not in shadow_text.lower():
+                    # Check if there are any contact-related elements
+                    contact_elements = shadow_soup.find_all(text=re.compile(r'contact', re.IGNORECASE))
+                    for element in contact_elements:
+                        parent = element.parent
+                        if parent.name == 'a' and parent.get('href'):
+                            # Already captured above
+                            pass
+                        elif parent.name in ['div', 'span', 'button', 'li']:
+                            # Look for onclick or data attributes
+                            if parent.get('onclick'):
+                                onclick = parent.get('onclick')
+                                if 'contact' in onclick.lower():
+                                    custom_print(f"⚠️ Potential contact link in shadow DOM onclick: {onclick[:50]}...")
+                
                 # Process shadow DOM HTML for social links
                 for platform, regex in SOCIAL_REGEXES.items():
                     matches = regex.findall(shadow_item["html"])
@@ -618,12 +879,6 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
                             custom_print(f"✅ Added shadow DOM {platform} link: {validated_link}")
                         elif not validated_link:
                             custom_print(f"🚫 Rejected shadow DOM {platform} media/invalid URL: {cleaned_match}")
-                
-                # Process shadow DOM <a> tags
-                for a in shadow_soup.find_all("a", href=True):
-                    href = urljoin(url, a["href"]).split("#")[0]  # Only remove fragment
-                    if href:
-                        all_hrefs.append(verify_href(href, "Shadow DOM"))
                 
                 # Extract tel from shadow DOM
                 shadow_tel_numbers = extract_all_tel_from_html(shadow_item["html"])
@@ -659,20 +914,21 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
         except json.JSONDecodeError:
             custom_print(f"❌ Failed to parse footerURL attribute: {footer.get('footerURL')}")
     
-    # Collect <a href> tags from footer
+    # Collect <a href> tags from footer - KEEP hash fragments
     footer_nav_links = []  # Store footer navigation links for Llama processing
     if footer:
         for href_elem in footer.select('a[href]'):
             if href_elem["href"] and not any(href_elem["href"].lower().endswith(ext) for ext in excluded_extensions):
-                href = urljoin(url, href_elem["href"]).split("#")[0]
+                # Pass raw href to verify_href
+                href_info = verify_href(href_elem["href"], "Footer")
+                all_hrefs.append(href_info)
+                # For navigation tracking
+                absolute_url = href_info["url"]
                 link_text = href_elem.get_text().strip()
-                if href:
-                    all_hrefs.append(verify_href(href_elem["href"], "Footer"))
-                    # Store for Llama processing (only http/https links)
-                    if href.startswith(('http://', 'https://')):
-                        footer_nav_links.append({"url": href, "text": link_text})
+                if absolute_url.startswith(('http://', 'https://')):
+                    footer_nav_links.append({"url": absolute_url, "text": link_text})
 
-    # Collect navbar/header links
+    # Collect navbar/header links - KEEP hash fragments
     navbar_links = []
     navbar_selector = (
         'nav, header, [role="navigation"], [class*="nav" i], [class*="menu" i], '
@@ -682,12 +938,25 @@ def scrape_info(html, is_about_page=False, is_contact_page=False, url="unknown",
     for nav_elem in navbar:
         for href_elem in nav_elem.select('a[href]'):
             if href_elem["href"] and not any(href_elem["href"].lower().endswith(ext) for ext in excluded_extensions):
-                href = urljoin(url, href_elem["href"]).split("#")[0]
+                href_info = verify_href(href_elem["href"], "Navbar")
+                all_hrefs.append(href_info)
+                absolute_url = href_info["url"]
                 link_text = href_elem.get_text().strip()
-                if href.startswith(('http://', 'https://')):
-                    navbar_links.append({"url": href, "text": link_text})
+                if absolute_url.startswith(('http://', 'https://')):
+                    navbar_links.append({"url": absolute_url, "text": link_text})
 
     custom_print(f"📋 Collected {len(navbar_links)} navbar links and {len(footer_nav_links)} footer links")
+    custom_print(f"📊 Total unique hrefs collected: {len(all_hrefs)}")
+
+    # Store ALL links from this page in the global tracker
+    global ALL_SCRAPED_LINKS
+    ALL_SCRAPED_LINKS[url] = {
+        'all_hrefs': all_hrefs.copy(),  # Store all hrefs
+        'navbar_links': navbar_links.copy(),  # Store navbar links
+        'footer_nav_links': footer_nav_links.copy(),  # Store footer nav links
+        'timestamp': time.time()
+    }
+    custom_print(f"💾 Stored {len(all_hrefs)} links from {url} in global tracker")
 
     # Process page sections
     about_sections = []

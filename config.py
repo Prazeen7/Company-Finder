@@ -1,21 +1,25 @@
 import re
+import os
 import tldextract
 
 extract = tldextract.TLDExtract()
 
 # === Configuration ===
+# API keys - read from environment variables (Modal secrets) or use defaults for local dev
 GOOGLE_API_KEYS = [
-    "AIzaSyDASUJ9-Q1kw0uYoUYuIpNZmBBvG-0PlCE",
-    "AIzaSyAeHrqRKZ1nYn_nNN8KXrgDrhX8_hy-bKo",
-    "AIzaSyCTWb-yJEKMc6ff9CXiW-jEWol05w7VldU",
-    "AIzaSyB8FHdHOcHygkkFxOitFdBxuT9MMwLwqoQ"
+    os.environ.get("GOOGLE_API_KEY_1", "AIzaSyDASUJ9-Q1kw0uYoUYuIpNZmBBvG-0PlCE"),
+    os.environ.get("GOOGLE_API_KEY_2", "AIzaSyAeHrqRKZ1nYn_nNN8KXrgDrhX8_hy-bKo"),
+    os.environ.get("GOOGLE_API_KEY_3", "AIzaSyCTWb-yJEKMc6ff9CXiW-jEWol05w7VldU"),
+    os.environ.get("GOOGLE_API_KEY_4", "AIzaSyB8FHdHOcHygkkFxOitFdBxuT9MMwLwqoQ"),
 ]
-SEARCH_ENGINE_ID = "a6cea8f5219ce4ccb"
+# Filter out None/empty values
+GOOGLE_API_KEYS = [k for k in GOOGLE_API_KEYS if k]
+SEARCH_ENGINE_ID = os.environ.get("SEARCH_ENGINE_ID", "a6cea8f5219ce4ccb")
 MAX_DEPTH = 3
 CRAWL_DELAY = 0.5
 RETRY_ATTEMPTS = 2
 TIMEOUT = 30
-DEBUG_DIR = "debug_html"
+DEBUG_DIR = os.environ.get("DEBUG_DIR", "debug_html")
 MODEL_NAME = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 MAX_SELENIUM_WORKERS = 4
 BATCH_SIZE = 5

@@ -124,6 +124,16 @@
 </head>
 
 <body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+    <!-- Model Status Banner -->
+    <div id="model-status-banner" class="bg-yellow-100 border-b border-yellow-300 px-4 py-3 overflow-hidden" style="max-height: 100px;">
+        <div class="container mx-auto flex items-center justify-center">
+            <div id="model-status-icon" class="mr-3 flex items-center">
+                <div class="loading-spinner border-yellow-600 border-t-yellow-300" style="width: 20px; height: 20px;"></div>
+            </div>
+            <span id="model-status-text" class="text-yellow-800 font-medium">AI Model: Initializing...</span>
+        </div>
+    </div>
+
     <div class="container mx-auto px-4 py-8">
         <!-- Header -->
         <div class="text-center mb-8">
@@ -257,10 +267,10 @@
 
                     <!-- Submit Button -->
                     <div class="flex justify-center pt-4">
-                        <button type="submit" id="submit-btn"
-                            class="inline-flex items-center px-8 py-3 bg-blue-600 text-white font-medium rounded-lg shadow-sm hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                            <i class="fas fa-search mr-2"></i>
-                            Search
+                        <button type="submit" id="submit-btn" disabled
+                            class="inline-flex items-center px-8 py-3 bg-gray-400 text-white font-medium rounded-lg shadow-sm cursor-not-allowed">
+                            <i class="fas fa-hourglass-half mr-2"></i>
+                            Waiting for AI Model...
                         </button>
                     </div>
                 </form>
@@ -317,6 +327,7 @@
     <script>
         let isSearching = false;
         let currentResults = [];
+        let modelReady = false;
 
         function toggleSearchType() {
             const searchType = document.getElementById('search_type').value;
@@ -659,6 +670,11 @@
         document.getElementById('search-form').addEventListener('submit', async function (event) {
             event.preventDefault();
 
+            if (!modelReady) {
+                showNotification('Please wait for the AI model to finish loading before searching.', 'warning');
+                return;
+            }
+
             if (isSearching) {
                 return;
             }
@@ -764,9 +780,101 @@
         });
 
 
+        // Model status polling
+        let modelStatusInterval = null;
+
+        function updateSearchButton() {
+            const submitBtn = document.getElementById('submit-btn');
+            if (modelReady) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-search mr-2"></i>Search';
+                submitBtn.className = 'inline-flex items-center px-8 py-3 bg-blue-600 text-white font-medium rounded-lg shadow-sm hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors';
+            } else {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<i class="fas fa-hourglass-half mr-2"></i>Waiting for AI Model...';
+                submitBtn.className = 'inline-flex items-center px-8 py-3 bg-gray-400 text-white font-medium rounded-lg shadow-sm cursor-not-allowed';
+            }
+        }
+
+        function updateModelStatus() {
+            fetch('/model-status')
+                .then(response => response.json())
+                .then(data => {
+                    const banner = document.getElementById('model-status-banner');
+                    const icon = document.getElementById('model-status-icon');
+                    const text = document.getElementById('model-status-text');
+
+                    if (data.status === 'loaded') {
+                        modelReady = true;
+                        updateSearchButton();
+
+                        banner.className = 'bg-green-100 border-b border-green-300 px-4 py-3';
+                        icon.innerHTML = '<i class="fas fa-check-circle text-green-600 text-xl"></i>';
+                        text.className = 'text-green-800 font-medium';
+                        text.textContent = 'AI Model: Ready';
+
+                        // Stop polling once loaded
+                        if (modelStatusInterval) {
+                            clearInterval(modelStatusInterval);
+                            modelStatusInterval = null;
+                        }
+
+                        // Hide banner after 5 seconds
+                        setTimeout(() => {
+                            banner.style.transition = 'all 0.5s ease';
+                            banner.style.maxHeight = '0';
+                            banner.style.padding = '0';
+                            banner.style.opacity = '0';
+                        }, 5000);
+
+                    } else if (data.status === 'loading') {
+                        modelReady = false;
+                        updateSearchButton();
+
+                        banner.className = 'bg-yellow-100 border-b border-yellow-300 px-4 py-3';
+                        icon.innerHTML = '<div class="loading-spinner border-yellow-600 border-t-yellow-300" style="width: 20px; height: 20px;"></div>';
+                        text.className = 'text-yellow-800 font-medium';
+                        text.textContent = `AI Model: ${data.message} (${data.progress}%)`;
+
+                    } else if (data.status === 'failed') {
+                        modelReady = false;
+                        updateSearchButton();
+
+                        banner.className = 'bg-red-100 border-b border-red-300 px-4 py-3';
+                        icon.innerHTML = '<i class="fas fa-exclamation-triangle text-red-600 text-xl"></i>';
+                        text.className = 'text-red-800 font-medium';
+                        text.textContent = 'AI Model: Failed to load - Please refresh the page';
+
+                        // Stop polling on failure
+                        if (modelStatusInterval) {
+                            clearInterval(modelStatusInterval);
+                            modelStatusInterval = null;
+                        }
+
+                    } else {
+                        // not_started
+                        modelReady = false;
+                        updateSearchButton();
+
+                        banner.className = 'bg-gray-100 border-b border-gray-300 px-4 py-3';
+                        icon.innerHTML = '<i class="fas fa-hourglass-start text-gray-600 text-xl"></i>';
+                        text.className = 'text-gray-800 font-medium';
+                        text.textContent = 'AI Model: Waiting to start...';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching model status:', error);
+                });
+        }
+
         // Initialize on page load
         window.onload = function () {
             toggleSearchType();
+            updateSearchButton();
+
+            // Start model status polling immediately
+            updateModelStatus();
+            modelStatusInterval = setInterval(updateModelStatus, 2000);
         }
     </script>
 </body>
